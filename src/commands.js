@@ -10,7 +10,7 @@ const { tagStates, saveTagStates } = require('./tag');
 const { dlOffStates, saveDlOffStates, isAutoDownloadEnabled } = require('./dl-toggle');
 const { sendSticker, convertStickerToMedia } = require('./sticker');
 const { detectPlatform, runDownloader } = require('./downloader');
-const { captureQuotedContent, addReminder, cancelReminder, listReminders, formatDueAt } = require('./reminder');
+const { captureQuotedContent, addReminder, cancelReminder, listReminders, formatDueAt } = require('./reminders');
 const { autoReplies, saveAutoReplies, photoHash, PHOTO_STORE_DIR } = require('./autoreply');
 
 //----------COMMAND HANDLER----------
