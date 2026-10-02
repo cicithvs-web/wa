@@ -36,6 +36,27 @@ const COOKIES_MAP = {
 const URL_REGEX = /https?:\/\/\S+/;
 const DL_UA = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0 Safari/537.36';
 
+//----------OWNER-ONLY COMMANDS----------
+// Gampang diubah: tambah/hapus nama command (lowercase, tanpa prefix) biar fromMe-only.
+// Kalau mau buka akses umum, hapus aja dari list ini. Kalau mau kunci command lain, tambahin.
+// Misal mau kunci 'dl' juga → tambahin 'dl' ke list.
+const OWNER_ONLY_COMMANDS = new Set([
+  // downloader toggle
+  'dloff', 'dlon', 'dlstatus',
+  // tag all (invisible)
+  'tag', 'tagon', 'tagoff',
+  // reminders
+  'reminder', 'reminders', 'delremind',
+  // welcome/goodbye
+  'welcome', 'welon', 'weloff', 'setwelcome', 'setbye',
+  // prefix
+  'setprefix',
+  // auto-reply
+  'set', 'del', 'listauto',
+  // ai — semua setting AI hanya owner
+  'ai', 'aion', 'aioff', 'setai', 'aisystem', 'newchat',
+]);
+
 //----------INIT DIRS----------
 if (!fs.existsSync(CONFIG.DOWNLOAD_TMP_DIR)) fs.mkdirSync(CONFIG.DOWNLOAD_TMP_DIR, { recursive: true });
 if (!fs.existsSync(YTDLP_BIN)) {
@@ -80,6 +101,7 @@ function isPrivateJid(jid = '') { return jid.endsWith('@s.whatsapp.net') || jid.
 
 module.exports = {
   CONFIG, YTDLP_BIN, COOKIES_DIR, COOKIES_MAP, URL_REGEX, DL_UA,
+  OWNER_ONLY_COMMANDS,
   logger, log, stats,
   isGroupJid, isPrivateJid,
 };

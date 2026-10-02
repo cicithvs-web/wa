@@ -3,133 +3,202 @@
 const fs   = require('fs');
 const path = require('path');
 const { downloadMediaMessage } = require('@whiskeysockets/baileys');
-const { CONFIG, URL_REGEX, log, stats, logger, isGroupJid, isPrivateJid } = require('./config');
+const { CONFIG, URL_REGEX, OWNER_ONLY_COMMANDS, log, stats, logger, isGroupJid, isPrivateJid } = require('./config');
 const { safeSend } = require('./helpers');
-const { extractViewOnce, processViewOnce } = require('./viewonce');
+const { extractViewOnce, processViewOnce, getLastViewOnce, getViewOnceById } = require('./viewonce');
 const { tagStates, saveTagStates } = require('./tag');
 const { dlOffStates, saveDlOffStates, isAutoDownloadEnabled } = require('./dl-toggle');
 const { sendSticker, convertStickerToMedia } = require('./sticker');
 const { detectPlatform, runDownloader } = require('./downloader');
 const { captureQuotedContent, addReminder, cancelReminder, listReminders, formatDueAt } = require('./reminders');
 const { autoReplies, saveAutoReplies, photoHash, PHOTO_STORE_DIR } = require('./autoreply');
+const { getPrefix, setPrefix } = require('./prefix');
+const {
+  getWelcomeState, setWelcomeEnabled, setWelcomeMsg, setByeMsg,
+  DEFAULT_WELCOME, DEFAULT_BYE,
+} = require('./welcome');
+const {
+  aiConfig, saveAiConfig, isAiEnabled, setAiEnabled,
+  clearHistory, DEFAULT_SYSTEM_PROMPT,
+} = require('./ai');
 
 //----------COMMAND HANDLER----------
 async function handleCommand(sock, msg, text) {
   const jid = msg.key?.remoteJid;
-  if (!jid || !text?.startsWith('.')) return;
+  const p = getPrefix();
+  if (!jid || !text?.startsWith(p)) return;
 
-  const cmd = text.trim().split(/\s+/)[0].toLowerCase();
+  // Pisahkan command dan argumen
+  const fullCmd = text.trim().split(/\s+/)[0];          // misal "#help" atau ".dl"
+  const cmd     = fullCmd.slice(p.length).toLowerCase(); // misal "help" atau "dl"
+  const args    = text.trim().slice(fullCmd.length).trim(); // sisanya setelah command
+
+  // Guard: command sensitif hanya bisa dipakai fromMe (owner)
+  // List ada di src/config.js -> OWNER_ONLY_COMMANDS (gampang ubah)
+  if (OWNER_ONLY_COMMANDS.has(cmd)) {
+    const fromMe = !!msg.key?.fromMe;
+    if (!fromMe) {
+      await safeSend(sock, jid, {
+        text: `❌ *Fitur ini hanya untuk owner*\n\n⚠️ Command *${p}${cmd}* cuma bisa dipakai dari akun owner (fromMe).`,
+        quoted: msg,
+      });
+      return;
+    }
+  }
 
   switch (cmd) {
-    case '.help':
-  await safeSend(sock, jid, {
-    text:
-      `╭─「 *WhatsApp Bot* 」\n` +
-      `│\n` +
 
-      `├─ *Media*\n` +
-      `│  ├ • *.open*\n` +
-      `│  ├ • *.sticker*\n` +
-      `│  ├ • *.toimage*\n` +
-      `│  └ • *.tovideo*\n` +
-      `│\n` +
+    // ============================================================
+    // INFORMASI
+    // ============================================================
+    case 'help':
+      await safeSend(sock, jid, {
+        text:
+          `╭─「 *WhatsApp Bot* 」\n` +
+          `│\n` +
 
-      `├─ *Downloader*\n` +
-      `│  ├ • Kirim link *(Auto)*\n` +
-      `│  ├ • *.dl <link>*\n` +
-      `│  ├ • *.dlon* / *.dloff*\n` +
-      `│  └ • *.dlstatus*\n` +
-      `│\n` +
+          `├─ *Media*\n` +
+          `│  ├ • *${p}open*\n` +
+          `│  ├ • *${p}sticker*\n` +
+          `│  ├ • *${p}toimage*\n` +
+          `│  └ • *${p}tovideo*\n` +
+          `│\n` +
 
-      `├─ *Scheduler*\n` +
-      `│  ├ • *Reply pesan* + *.reminder <detik>*\n` +
-      `│  ├ • *.reminders*\n` +
-      `│  └ • *.delremind <id>*\n` +
-      `│\n` +
+          `├─ *Downloader*\n` +
+          `│  ├ • Kirim link *(Auto)*\n` +
+          `│  ├ • *${p}dl <link>*\n` +
+          `│  ├ • *${p}dlon* / *${p}dloff*\n` +
+          `│  └ • *${p}dlstatus*\n` +
+          `│\n` +
 
-      `├─ *Sistem*\n` +
-      `│  ├ • *.status*\n` +
-      `│  ├ • *.ping*\n` +
-      `│  └ • *.uptime*\n` +
-      `│\n` +
+          `├─ *Scheduler*\n` +
+          `│  ├ • *Reply pesan* + *${p}reminder <detik>*\n` +
+          `│  ├ • *${p}reminders*\n` +
+          `│  └ • *${p}delremind <id>*\n` +
+          `│\n` +
 
-      `╰─ *Version ${CONFIG.VERSION}*`,
-  });
-  break;
+          `├─ *Grup*\n` +
+          `│  ├ • *${p}welcome* / *${p}welon* / *${p}weloff*\n` +
+          `│  ├ • *${p}setwelcome <pesan>*\n` +
+          `│  ├ • *${p}setbye <pesan>*\n` +
+          `│  ├ • *${p}tag* / *${p}tagon* / *${p}tagoff*\n` +
+          `│  └ • Placeholder: {name} {group} {count}\n` +
+          `│\n` +
 
-case '.status': {
-  const s = stats;
-  await safeSend(sock, jid, {
-    text:
-      `╭─「 *Bot Status* 」\n` +
-      `│\n` +
-      `├─ *Statistik*\n` +
-      `│  ├Images         : ${s.image}\n` +
-      `│  ├Videos          : ${s.video}\n` +
-      `│  ├Audios          : ${s.audio}\n` +
-      `│  ├Sticker          : ${s.sticker}\n` +
-      `│  ├Download    : ${s.download}\n` +
-      `│  ├Failed           : ${s.failed}\n` +
-      `│  └Total             : ${s.total()}\n` +
-      `│\n` +
-      `├─ *Informasi*\n` +
-      `│  ├ Uptime      : ${s.uptime()}\n` +
-      `│  └ Version     : ${CONFIG.VERSION}\n` +
-      `│\n` +
-      `╰─ Bot Berjalan Normal`,
-  });
-  break;
-}
+          `├─ *AI Chat*\n` +
+          `│  ├ • *${p}ai* / *${p}aion* / *${p}aioff*\n` +
+          `│  ├ • *${p}setai key|model|url*\n` +
+          `│  ├ • *${p}aisystem <prompt>*\n` +
+          `│  └ • *${p}newchat* (reset memory)\n` +
+          `│\n` +
 
-    case '.ping':
+          `├─ *Sistem*\n` +
+          `│  ├ • *${p}status*\n` +
+          `│  ├ • *${p}ping*\n` +
+          `│  ├ • *${p}uptime*\n` +
+          `│  └ • *${p}setprefix <prefix>*\n` +
+          `│\n` +
+
+          `╰─ *Version ${CONFIG.VERSION}* | Prefix: *${p}*`,
+      });
+      break;
+
+    case 'status': {
+      const s = stats;
+      await safeSend(sock, jid, {
+        text:
+          `╭─「 *Bot Status* 」\n` +
+          `│\n` +
+          `├─ *Statistik*\n` +
+          `│  ├Images         : ${s.image}\n` +
+          `│  ├Videos          : ${s.video}\n` +
+          `│  ├Audios          : ${s.audio}\n` +
+          `│  ├Sticker          : ${s.sticker}\n` +
+          `│  ├Download    : ${s.download}\n` +
+          `│  ├Failed           : ${s.failed}\n` +
+          `│  └Total             : ${s.total()}\n` +
+          `│\n` +
+          `├─ *Informasi*\n` +
+          `│  ├ Uptime      : ${s.uptime()}\n` +
+          `│  ├ Prefix        : ${p}\n` +
+          `│  └ Version     : ${CONFIG.VERSION}\n` +
+          `│\n` +
+          `╰─ Bot Berjalan Normal`,
+      });
+      break;
+    }
+
+    case 'ping':
       await safeSend(sock, jid, { text: '🏓 Pong! Bot aktif.' });
       break;
 
-    case '.uptime':
+    case 'uptime':
       await safeSend(sock, jid, { text: `⏱️ *Uptime:* ${stats.uptime()}` });
       break;
 
-    //------(.open) - BUKA VIEW ONCE------
-    case '.open': {
+    // ============================================================
+    // MEDIA — VIEW ONCE
+    // ============================================================
+    case 'open': {
       const ctxInfo = msg.message?.extendedTextMessage?.contextInfo;
       const quotedId = ctxInfo?.stanzaId;
       const quotedMsg = ctxInfo?.quotedMessage;
 
-      if (!quotedId || !quotedMsg) {
+      let voData = null;
+      let targetMsg = null;
+
+      // 1. Reply langsung ke pesan view once
+      if (quotedId && quotedMsg) {
+        const fakeMsg = {
+          key: {
+            remoteJid: jid,
+            fromMe: false,
+            id: quotedId,
+            participant: ctxInfo?.participant || jid,
+          },
+          message: quotedMsg,
+        };
+        const extracted = extractViewOnce(fakeMsg);
+        if (extracted) {
+          voData = { ...extracted, chatJid: jid };
+          targetMsg = fakeMsg;
+        } else {
+          // Cek cache berdasarkan ID pesan yang di-reply
+          const byId = getViewOnceById(quotedId);
+          if (byId) {
+            voData = { ...byId.vo, chatJid: jid, buffer: byId.buffer };
+            targetMsg = byId.msg;
+          }
+        }
+      }
+
+      // 2. Tanpa reply → ambil VO terakhir di chat ini
+      if (!voData) {
+        const lastVo = getLastViewOnce(jid);
+        if (lastVo) {
+          voData = { ...lastVo.vo, chatJid: jid, buffer: lastVo.buffer };
+          targetMsg = lastVo.msg;
+        }
+      }
+
+      if (!voData) {
         await safeSend(sock, jid, {
-          text: `⚠️ Reply ke pesan view once, lalu ketik *.open*`,
+          text: `⚠️ Tidak ada pesan view once yang ditemukan di chat ini.\n\nReply ke pesan view once atau ketik *${p}open* langsung setelah menerima view once.`,
           quoted: msg,
         });
         break;
       }
 
-      const fakeMsg = {
-        key: {
-          remoteJid: jid,
-          fromMe: false,
-          id: quotedId,
-          participant: ctxInfo?.participant || jid,
-        },
-        message: quotedMsg,
-      };
-
-      const vo = extractViewOnce(fakeMsg);
-      if (!vo) {
-        await safeSend(sock, jid, {
-          text: `⚠️ Bukan view once atau sudah expired.`,
-          quoted: msg,
-        });
-        break;
-      }
-
-      await processViewOnce(sock, { ...vo, chatJid: jid }, msg);
+      await processViewOnce(sock, voData, msg, targetMsg);
       break;
     }
 
-    //------(.tag) - CEK STATUS BOT AUTO TAG ALL MEMBERS------
-    case '.tag': {
+    // ============================================================
+    // GRUP — AUTO TAG
+    // ============================================================
+    case 'tag': {
       if (!isGroupJid(jid)) {
-        await safeSend(sock, jid, { text: '⚠️ .tag hanya bisa di grup!' });
+        await safeSend(sock, jid, { text: `⚠️ ${p}tag hanya bisa di grup!` });
         break;
       }
 
@@ -143,15 +212,14 @@ case '.status': {
               `👥 Member: ${count} orang\n` +
               `🔔 Status: ${isActive ? '✅ AKTIF' : '❌ NONAKTIF'}\n` +
               `👻 Mode: INVISIBLE (tanpa @)\n\n` +
-              `${isActive ? '🔄 .tagoff untuk matikan' : '🔄 .tagon untuk aktifkan'}`,
+              `${isActive ? `🔄 ${p}tagoff untuk matikan` : `🔄 ${p}tagon untuk aktifkan`}`,
       });
       break;
     }
 
-    //------(.tagon) - AKTIFKAN BOT AUTO TAG ALL MEMBERS (INVISIBLE)------
-    case '.tagon': {
+    case 'tagon': {
       if (!isGroupJid(jid)) {
-        await safeSend(sock, jid, { text: '⚠️ .tagon hanya bisa di grup!' });
+        await safeSend(sock, jid, { text: `⚠️ ${p}tagon hanya bisa di grup!` });
         break;
       }
 
@@ -165,15 +233,14 @@ case '.status': {
         text: `🔔 *Bot Auto-Tag ALL AKTIF!*\n\n` +
               `📌 Setiap pesan BOT akan otomatis ngetag *${count}* member\n` +
               `👻 TAPI *TANPA* @ muncul di chat!\n` +
-              `🚫 Matikan dengan *.tagoff*`,
+              `🚫 Matikan dengan *${p}tagoff*`,
       });
       break;
     }
 
-    //------(.tagoff) - MATIKAN BOT AUTO TAG ALL MEMBERS------
-    case '.tagoff': {
+    case 'tagoff': {
       if (!isGroupJid(jid)) {
-        await safeSend(sock, jid, { text: '⚠️ .tagoff hanya bisa di grup!' });
+        await safeSend(sock, jid, { text: `⚠️ ${p}tagoff hanya bisa di grup!` });
         break;
       }
 
@@ -183,27 +250,125 @@ case '.status': {
       await safeSend(sock, jid, {
         text: `🔕 *Bot Auto-Tag ALL NONAKTIF!*\n\n` +
               `📌 Pesan BOT akan dikirim normal tanpa tag.\n` +
-              `🔄 Aktifkan lagi dengan *.tagon*`,
+              `🔄 Aktifkan lagi dengan *${p}tagon*`,
       });
       break;
     }
 
-    //------(.dloff) - MATIKAN AUTO-DOWNLOAD LINK DI CHAT INI------
-    case '.dloff': {
-      dlOffStates.set(jid, true);
-      saveDlOffStates();
+    // ============================================================
+    // GRUP — WELCOME / GOODBYE
+    // ============================================================
+    case 'welcome': {
+      if (!isGroupJid(jid)) {
+        await safeSend(sock, jid, { text: `⚠️ ${p}welcome hanya bisa di grup!` });
+        break;
+      }
+      const ws = getWelcomeState(jid);
+      const groupMeta = await sock.groupMetadata(jid);
       await safeSend(sock, jid, {
-        text: `🔕 *Auto-download link DIMATIKAN* di chat ini.\n\n` +
-              `📌 Link TikTok/IG/X/FB/YouTube yang dikirim di sini gak bakal auto-download lagi.\n` +
-              `💡 *.dl <link>* tetap bisa dipakai manual.\n` +
-              `🔄 Aktifkan lagi dengan *.dlon*`,
+        text:
+          `📊 *Welcome/Goodbye Status*\n\n` +
+          `📌 Grup: ${groupMeta.subject}\n` +
+          `🔔 Status: ${ws?.enabled ? '✅ AKTIF' : '❌ NONAKTIF'}\n\n` +
+          `👋 *Pesan Welcome:*\n${ws?.welcomeMsg || DEFAULT_WELCOME}\n\n` +
+          `👋 *Pesan Goodbye:*\n${ws?.byeMsg || DEFAULT_BYE}\n\n` +
+          `📝 *Placeholder:* {name} {group} {count}\n\n` +
+          `🔧 *${p}setwelcome <pesan>* — ubah welcome\n` +
+          `🔧 *${p}setbye <pesan>* — ubah goodbye\n` +
+          `${ws?.enabled ? `🔄 *${p}weloff* untuk matikan` : `🔄 *${p}welon* untuk aktifkan`}`,
+      });
+      break;
+    }
+
+    case 'welon': {
+      if (!isGroupJid(jid)) {
+        await safeSend(sock, jid, { text: `⚠️ ${p}welon hanya bisa di grup!` });
+        break;
+      }
+      setWelcomeEnabled(jid, true);
+      await safeSend(sock, jid, {
+        text: `✅ *Welcome/Goodbye AKTIF!*\n\n` +
+              `📌 Bot akan menyapa member baru & pamitkan yang keluar.\n` +
+              `🔄 Matikan: *${p}weloff*`,
+      });
+      break;
+    }
+
+    case 'weloff': {
+      if (!isGroupJid(jid)) {
+        await safeSend(sock, jid, { text: `⚠️ ${p}weloff hanya bisa di grup!` });
+        break;
+      }
+      setWelcomeEnabled(jid, false);
+      await safeSend(sock, jid, {
+        text: `🔕 *Welcome/Goodbye NONAKTIF!*\n\n` +
+              `📌 Bot tidak akan menyapa member baru lagi.\n` +
+              `🔄 Aktifkan: *${p}welon*`,
+      });
+      break;
+    }
+
+    case 'setwelcome': {
+      if (!isGroupJid(jid)) {
+        await safeSend(sock, jid, { text: `⚠️ ${p}setwelcome hanya bisa di grup!` });
+        break;
+      }
+      if (!args) {
+        await safeSend(sock, jid, {
+          text: `⚠️ Format: *${p}setwelcome <pesan>*\n\n` +
+                `Placeholder:\n• {name} — nama/nomor member\n• {group} — nama grup\n• {count} — jumlah member\n\n` +
+                `Contoh:\n${p}setwelcome Halo {name}! Selamat datang di {group} 🎉\nKamu member ke-{count}`,
+          quoted: msg,
+        });
+        break;
+      }
+      setWelcomeMsg(jid, args);
+      await safeSend(sock, jid, {
+        text: `✅ *Pesan welcome diperbarui!*\n\n📝 Preview:\n${args}`,
         quoted: msg,
       });
       break;
     }
 
-    //------(.dlon) - AKTIFKAN LAGI AUTO-DOWNLOAD LINK DI CHAT INI------
-    case '.dlon': {
+    case 'setbye': {
+      if (!isGroupJid(jid)) {
+        await safeSend(sock, jid, { text: `⚠️ ${p}setbye hanya bisa di grup!` });
+        break;
+      }
+      if (!args) {
+        await safeSend(sock, jid, {
+          text: `⚠️ Format: *${p}setbye <pesan>*\n\n` +
+                `Placeholder:\n• {name} — nama/nomor member\n• {group} — nama grup\n• {count} — jumlah member\n\n` +
+                `Contoh:\n${p}setbye Bye bye {name} 👋`,
+          quoted: msg,
+        });
+        break;
+      }
+      setByeMsg(jid, args);
+      await safeSend(sock, jid, {
+        text: `✅ *Pesan goodbye diperbarui!*\n\n📝 Preview:\n${args}`,
+        quoted: msg,
+      });
+      break;
+    }
+
+    // ============================================================
+    // DOWNLOADER
+    // ============================================================
+    case 'dloff': {
+      dlOffStates.set(jid, true);
+      saveDlOffStates();
+      await safeSend(sock, jid, {
+        text: `🔕 *Auto-download link DIMATIKAN* di chat ini.\n\n` +
+              `📌 Link TikTok/IG/X/FB/YouTube yang dikirim di sini gak bakal auto-download lagi.\n` +
+              `💡 *${p}dl <link>* tetap bisa dipakai manual.\n` +
+              `🔄 Aktifkan lagi dengan *${p}dlon*`,
+        quoted: msg,
+      });
+      break;
+    }
+
+    case 'dlon': {
       dlOffStates.delete(jid);
       saveDlOffStates();
       await safeSend(sock, jid, {
@@ -214,27 +379,68 @@ case '.status': {
       break;
     }
 
-    //------(.dlstatus) - CEK STATUS AUTO-DOWNLOAD DI CHAT INI------
-    case '.dlstatus': {
+    case 'dlstatus': {
       const enabled = isAutoDownloadEnabled(jid);
       await safeSend(sock, jid, {
         text: `📊 *Status Auto-Download di chat ini:*\n` +
               `${enabled ? '✅ AKTIF' : '❌ NONAKTIF'}\n\n` +
-              `${enabled ? '🔄 .dloff untuk matikan' : '🔄 .dlon untuk aktifkan'}`,
+              `${enabled ? `🔄 ${p}dloff untuk matikan` : `🔄 ${p}dlon untuk aktifkan`}`,
         quoted: msg,
       });
       break;
     }
 
-    //------(.sticker) - MANUAL STICKER (REPLY FOTO/VIDEO)-------
-    case '.sticker': {
+    case 'dl': {
+      const urlMatch = args.match(URL_REGEX);
+      if (!urlMatch) {
+        await safeSend(sock, jid, {
+          text: `⚠️ Format: *${p}dl <link>*\n\nContoh: ${p}dl https://vt.tiktok.com/xxxxx`,
+          quoted: msg,
+        });
+        break;
+      }
+
+      const url = urlMatch[0];
+      const platform = detectPlatform(url);
+      if (!platform) {
+        await safeSend(sock, jid, {
+          text: `⚠️ Link tidak dikenali. Yang didukung: TikTok, Instagram, X/Twitter, Facebook, YouTube.`,
+          quoted: msg,
+        });
+        break;
+      }
+
+      log.info(`📥 ${p}dl request: ${platform} from ${jid}`);
+      const statusMsg = await safeSend(sock, jid, { text: '⏳ Lagi download, tunggu sebentar...', quoted: msg });
+
+      try {
+        await runDownloader(sock, jid, url, platform, msg);
+        if (statusMsg) { try { await sock.sendMessage(jid, { delete: statusMsg.key }); } catch (_) {} }
+        log.ok(`✅ Download berhasil untuk ${platform}`);
+      } catch (err) {
+        log.err(`Download error: ${err.message}`);
+        const errorText = `⚠️ Download gagal:\n\n${(err.message || 'unknown error').slice(0, 400)}`;
+        if (statusMsg) {
+          try { await sock.sendMessage(jid, { text: errorText, edit: statusMsg.key }); }
+          catch (_) { await safeSend(sock, jid, { text: errorText, quoted: msg }); }
+        } else {
+          await safeSend(sock, jid, { text: errorText, quoted: msg });
+        }
+      }
+      break;
+    }
+
+    // ============================================================
+    // STICKER
+    // ============================================================
+    case 'sticker': {
       const ctxInfo = msg.message?.extendedTextMessage?.contextInfo;
       const quotedMsg = ctxInfo?.quotedMessage;
       const quotedId = ctxInfo?.stanzaId;
 
       if (!quotedId || !quotedMsg) {
         await safeSend(sock, jid, {
-          text: `⚠️ Reply ke foto/video, lalu ketik *.sticker*`,
+          text: `⚠️ Reply ke foto/video, lalu ketik *${p}sticker*`,
           quoted: msg,
         });
         break;
@@ -246,7 +452,7 @@ case '.status': {
 
       if (isSticker) {
         await safeSend(sock, jid, {
-          text: `⚠️ Ini sudah stiker. Pake *.toimage* atau *.tovideo* kalo mau balikin.`,
+          text: `⚠️ Ini sudah stiker. Pake *${p}toimage* atau *${p}tovideo* kalo mau balikin.`,
           quoted: msg,
         });
         break;
@@ -300,15 +506,14 @@ case '.status': {
       break;
     }
 
-    //------(.toimage) - CONVERT STICKER KE GAMBAR------
-    case '.toimage': {
+    case 'toimage': {
       const ctxInfo = msg.message?.extendedTextMessage?.contextInfo;
       const quotedMsg = ctxInfo?.quotedMessage;
       const quotedId = ctxInfo?.stanzaId;
 
       if (!quotedId || !quotedMsg) {
         await safeSend(sock, jid, {
-          text: `⚠️ Reply ke stiker, lalu ketik *.toimage*`,
+          text: `⚠️ Reply ke stiker, lalu ketik *${p}toimage*`,
           quoted: msg,
         });
         break;
@@ -336,15 +541,14 @@ case '.status': {
       break;
     }
 
-    //------(.tovideo) - CONVERT STICKER KE VIDEO------
-    case '.tovideo': {
+    case 'tovideo': {
       const ctxInfo = msg.message?.extendedTextMessage?.contextInfo;
       const quotedMsg = ctxInfo?.quotedMessage;
       const quotedId = ctxInfo?.stanzaId;
 
       if (!quotedId || !quotedMsg) {
         await safeSend(sock, jid, {
-          text: `⚠️ Reply ke stiker, lalu ketik *.tovideo*`,
+          text: `⚠️ Reply ke stiker, lalu ketik *${p}tovideo*`,
           quoted: msg,
         });
         break;
@@ -372,52 +576,11 @@ case '.status': {
       break;
     }
 
-    //------(.dl) - DOWNLOAD MANUAL DARI LINK-------
-    case '.dl': {
-      const arg = text.slice(4).trim();
-      const urlMatch = arg.match(URL_REGEX);
-      if (!urlMatch) {
-        await safeSend(sock, jid, {
-          text: `⚠️ Format: *.dl <link>*\n\nContoh: .dl https://vt.tiktok.com/xxxxx`,
-          quoted: msg,
-        });
-        break;
-      }
-
-      const url = urlMatch[0];
-      const platform = detectPlatform(url);
-      if (!platform) {
-        await safeSend(sock, jid, {
-          text: `⚠️ Link tidak dikenali. Yang didukung: TikTok, Instagram, X/Twitter, Facebook, YouTube.`,
-          quoted: msg,
-        });
-        break;
-      }
-
-      log.info(`📥 .dl request: ${platform} from ${jid}`);
-      const statusMsg = await safeSend(sock, jid, { text: '⏳ Lagi download, tunggu sebentar...', quoted: msg });
-
-      try {
-        await runDownloader(sock, jid, url, platform, msg);
-        if (statusMsg) { try { await sock.sendMessage(jid, { delete: statusMsg.key }); } catch (_) {} }
-        log.ok(`✅ Download berhasil untuk ${platform}`);
-      } catch (err) {
-        log.err(`Download error: ${err.message}`);
-        const errorText = `⚠️ Download gagal:\n\n${(err.message || 'unknown error').slice(0, 400)}`;
-        if (statusMsg) {
-          try { await sock.sendMessage(jid, { text: errorText, edit: statusMsg.key }); }
-          catch (_) { await safeSend(sock, jid, { text: errorText, quoted: msg }); }
-        } else {
-          await safeSend(sock, jid, { text: errorText, quoted: msg });
-        }
-      }
-      break;
-    }
-
-    //------(.reminder) - REPLY PESAN + DETIK, FORWARD OTOMATIS------
-    case '.reminder': {
-      const argParts = text.trim().split(/\s+/);
-      const secArg = parseInt(argParts[1], 10);
+    // ============================================================
+    // SCHEDULER / REMINDER
+    // ============================================================
+    case 'reminder': {
+      const secArg = parseInt(args.split(/\s+/)[0], 10);
 
       const ctxInfo   = msg.message?.extendedTextMessage?.contextInfo;
       const quotedId  = ctxInfo?.stanzaId;
@@ -426,8 +589,8 @@ case '.status': {
       if (!quotedMsg || !quotedId) {
         await safeSend(sock, jid, {
           text:
-            `⚠️ Reply ke pesan (foto/video/audio/sticker/teks) yang mau dijadwalkan, lalu ketik *.reminder <detik>*\n\n` +
-            `Contoh: .reminder 600  (600 detik = 10 menit)`,
+            `⚠️ Reply ke pesan (foto/video/audio/sticker/teks) yang mau dijadwalkan, lalu ketik *${p}reminder <detik>*\n\n` +
+            `Contoh: ${p}reminder 600  (600 detik = 10 menit)`,
           quoted: msg,
         });
         break;
@@ -435,7 +598,7 @@ case '.status': {
 
       if (!secArg || secArg <= 0) {
         await safeSend(sock, jid, {
-          text: `⚠️ Format: *.reminder <detik>*\n\nContoh: .reminder 600`,
+          text: `⚠️ Format: *${p}reminder <detik>*\n\nContoh: ${p}reminder 600`,
           quoted: msg,
         });
         break;
@@ -451,7 +614,7 @@ case '.status': {
             `🔁 Diulang tiap ${secArg} detik, terus-menerus\n` +
             `📅 Kirim pertama: ${formatDueAt(r.dueAt)}\n` +
             `📎 Tipe: ${content.type}\n\n` +
-            `_Stop kapan aja: .delremind ${r.id}_`,
+            `_Stop kapan aja: ${p}delremind ${r.id}_`,
           quoted: msg,
         });
       } catch (e) {
@@ -460,8 +623,7 @@ case '.status': {
       break;
     }
 
-    //------(.reminders) - LIST REMINDER AKTIF------
-    case '.reminders': {
+    case 'reminders': {
       const list = listReminders(jid);
       if (!list.length) {
         await safeSend(sock, jid, { text: '📋 Tidak ada reminder aktif di chat ini.' });
@@ -474,16 +636,15 @@ case '.status': {
         return `#${r.id} - tiap ${r.intervalMs / 1000}d - berikutnya ${formatDueAt(r.dueAt)}\n   ${preview}`;
       }).join('\n\n');
       await safeSend(sock, jid, {
-        text: `⏰ *Reminder Aktif (${list.length})*\n\n${body}\n\n_Hapus: .delremind <id>_`,
+        text: `⏰ *Reminder Aktif (${list.length})*\n\n${body}\n\n_Hapus: ${p}delremind <id>_`,
       });
       break;
     }
 
-    //------(.delremind) - BATALKAN REMINDER------
-    case '.delremind': {
-      const idArg = parseInt(text.slice(11).trim(), 10);
+    case 'delremind': {
+      const idArg = parseInt(args, 10);
       if (!idArg) {
-        await safeSend(sock, jid, { text: `⚠️ Format: *.delremind <id>*` });
+        await safeSend(sock, jid, { text: `⚠️ Format: *${p}delremind <id>*` });
         break;
       }
       const ok = cancelReminder(idArg, jid);
@@ -493,51 +654,91 @@ case '.status': {
       break;
     }
 
-    // .set / .del / .listauto — AUTO REPLY
-    default: {
-      if (!text.startsWith('.set') && !text.startsWith('.del') && text !== '.listauto') break;
+    // ============================================================
+    // SISTEM — SET PREFIX
+    // ============================================================
+    case 'setprefix': {
+      if (!args) {
+        await safeSend(sock, jid, {
+          text: `⚠️ Format: *${p}setprefix <prefix_baru>*\n\n` +
+                `Contoh:\n• ${p}setprefix #\n• ${p}setprefix !\n• ${p}setprefix r\n• ${p}setprefix 7\n\n` +
+                `Prefix sekarang: *${p}*`,
+          quoted: msg,
+        });
+        break;
+      }
+      const newPrefix = args.split(/\s+/)[0];
+      if (newPrefix.length > 5) {
+        await safeSend(sock, jid, { text: `⚠️ Prefix terlalu panjang! Maksimal 5 karakter.`, quoted: msg });
+        break;
+      }
+      try {
+        const oldPrefix = p;
+        setPrefix(newPrefix);
+        await safeSend(sock, jid, {
+          text: `✅ *Prefix diubah!*\n\n` +
+                `📌 *${oldPrefix}* → *${newPrefix}*\n\n` +
+                `💡 Sekarang gunakan *${newPrefix}help* untuk melihat menu.`,
+          quoted: msg,
+        });
+      } catch (e) {
+        await safeSend(sock, jid, { text: `❌ Gagal ubah prefix: ${e.message}`, quoted: msg });
+      }
+      break;
+    }
 
+    // ============================================================
+    // AUTO REPLY
+    // ============================================================
+    case 'listauto': {
+      if (!isPrivateJid(jid)) {
+        await safeSend(sock, jid, { text: '⚠️ Auto-reply hanya tersedia di private chat.' });
+        break;
+      }
+      const keys = Object.keys(autoReplies);
+      if (keys.length === 0) {
+        await safeSend(sock, jid, { text: `📋 Belum ada auto-reply.\n\nGunakan *${p}set trigger | balasan* untuk menambah.` });
+        break;
+      }
+      const list = keys.map((k, i) => {
+        const e = autoReplies[k];
+        const trigLabel = k.startsWith('__photo__') ? `[foto:${k.slice(9, 17)}]` : k;
+        const valLabel  = e.type === 'photo' ? `[foto] ${e.caption || ''}` : e.value;
+        return `${i + 1}. *${trigLabel}* -> ${valLabel}`;
+      }).join('\n');
+      await safeSend(sock, jid, { text: `📋 *Daftar Auto-Reply (${keys.length}):*\n\n${list}\n\n_Hapus: ${p}del <trigger>_` });
+      break;
+    }
+
+    case 'del': {
+      if (!isPrivateJid(jid)) {
+        await safeSend(sock, jid, { text: '⚠️ Auto-reply hanya tersedia di private chat.' });
+        break;
+      }
+      const trigger = args.trim().toLowerCase();
+      if (!trigger) {
+        await safeSend(sock, jid, { text: `⚠️ Format: *${p}del trigger*` });
+        break;
+      }
+      if (!autoReplies[trigger]) {
+        await safeSend(sock, jid, { text: `⚠️ Trigger *${trigger}* tidak ditemukan.` });
+        break;
+      }
+      if (autoReplies[trigger].type === 'photo') {
+        try { fs.unlinkSync(path.join(PHOTO_STORE_DIR, autoReplies[trigger].value)); } catch (_) {}
+      }
+      delete autoReplies[trigger];
+      saveAutoReplies(autoReplies);
+      await safeSend(sock, jid, { text: `🗑️ Auto-reply *${trigger}* dihapus.` });
+      break;
+    }
+
+    case 'set': {
       if (!isPrivateJid(jid)) {
         await safeSend(sock, jid, { text: '⚠️ Auto-reply hanya tersedia di private chat.' });
         break;
       }
 
-      if (text === '.listauto') {
-        const keys = Object.keys(autoReplies);
-        if (keys.length === 0) {
-          await safeSend(sock, jid, { text: '📋 Belum ada auto-reply.\n\nGunakan *.set trigger | balasan* untuk menambah.' });
-          break;
-        }
-        const list = keys.map((k, i) => {
-          const e = autoReplies[k];
-          const trigLabel = k.startsWith('__photo__') ? `[foto:${k.slice(9, 17)}]` : k;
-          const valLabel  = e.type === 'photo' ? `[foto] ${e.caption || ''}` : e.value;
-          return `${i + 1}. *${trigLabel}* -> ${valLabel}`;
-        }).join('\n');
-        await safeSend(sock, jid, { text: `📋 *Daftar Auto-Reply (${keys.length}):*\n\n${list}\n\n_Hapus: .del <trigger>_` });
-        break;
-      }
-
-      if (text.startsWith('.del')) {
-        const trigger = text.slice(4).trim().toLowerCase();
-        if (!trigger) {
-          await safeSend(sock, jid, { text: '⚠️ Format: *.del trigger*' });
-          break;
-        }
-        if (!autoReplies[trigger]) {
-          await safeSend(sock, jid, { text: `⚠️ Trigger *${trigger}* tidak ditemukan.` });
-          break;
-        }
-        if (autoReplies[trigger].type === 'photo') {
-          try { fs.unlinkSync(path.join(PHOTO_STORE_DIR, autoReplies[trigger].value)); } catch (_) {}
-        }
-        delete autoReplies[trigger];
-        saveAutoReplies(autoReplies);
-        await safeSend(sock, jid, { text: `🗑️ Auto-reply *${trigger}* dihapus.` });
-        break;
-      }
-
-      const setArg = text.slice(4).trim();
       const ctxInfo   = msg.message?.extendedTextMessage?.contextInfo;
       const quotedMsg = ctxInfo?.quotedMessage;
       const quotedId  = ctxInfo?.stanzaId;
@@ -579,36 +780,36 @@ case '.status': {
             break;
           }
         } else {
-          replyEntry = { type: 'text', value: setArg };
+          replyEntry = { type: 'text', value: args };
         }
 
       } else {
         if (selfPhoto) {
-          trigger = setArg.toLowerCase();
+          trigger = args.toLowerCase();
           try {
             const buf = await downloadMediaMessage(msg, 'buffer', {}, { logger, reuploadRequest: sock.updateMediaMessage });
             const fname = `reply_${Date.now()}.jpg`;
             fs.writeFileSync(path.join(PHOTO_STORE_DIR, fname), buf);
-            replyEntry = { type: 'photo', value: fname, caption: msg.message?.imageMessage?.caption?.replace(/^\.set\s*/i,'').replace(trigger,'').trim() || '' };
+            replyEntry = { type: 'photo', value: fname, caption: args.replace(new RegExp(trigger.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'), 'i'), '').trim() || '' };
           } catch (e) {
             await safeSend(sock, jid, { text: '❌ Gagal simpan foto: ' + e.message });
             break;
           }
         } else {
-          const sep = setArg.indexOf('|');
+          const sep = args.indexOf('|');
           if (sep === -1) {
             await safeSend(sock, jid, {
               text:
-                '⚠️ *Format .set:*\n\n' +
-                '*1. Trigger teks → balas teks:*\n   .set halo | hai juga!\n\n' +
-                '*2. Trigger teks → balas foto:*\n   [kirim foto] caption: .set halo\n\n' +
-                '*3. Trigger foto → balas teks:*\n   [reply foto] .set balasan kamu\n\n' +
-                '*4. Trigger foto → balas foto:*\n   [reply foto] kirim .set [dengan foto]',
+                `⚠️ *Format ${p}set:*\n\n` +
+                `*1. Trigger teks → balas teks:*\n   ${p}set halo | hai juga!\n\n` +
+                `*2. Trigger teks → balas foto:*\n   [kirim foto] caption: ${p}set halo\n\n` +
+                `*3. Trigger foto → balas teks:*\n   [reply foto] ${p}set balasan kamu\n\n` +
+                `*4. Trigger foto → balas foto:*\n   [reply foto] kirim ${p}set [dengan foto]`,
             });
             break;
           }
-          trigger    = setArg.slice(0, sep).trim().toLowerCase();
-          replyEntry = { type: 'text', value: setArg.slice(sep + 1).trim() };
+          trigger    = args.slice(0, sep).trim().toLowerCase();
+          replyEntry = { type: 'text', value: args.slice(sep + 1).trim() };
         }
       }
 
@@ -636,6 +837,181 @@ case '.status': {
       });
       break;
     }
+
+    // ============================================================
+    // AI CHAT
+    // ============================================================
+    case 'ai': {
+      const enabled = isAiEnabled(jid);
+      const hasConfig = !!(aiConfig.apiKey && aiConfig.model && aiConfig.baseUrl);
+      const masked = aiConfig.apiKey
+        ? aiConfig.apiKey.slice(0, 6) + '...' + aiConfig.apiKey.slice(-4)
+        : '(belum diset)';
+
+      await safeSend(sock, jid, {
+        text:
+          `🤖 *AI Chat Status*\n\n` +
+          `🔔 Status: ${enabled ? '✅ AKTIF' : '❌ NONAKTIF'}\n` +
+          `🔑 API Key: ${masked}\n` +
+          `🧠 Model: ${aiConfig.model || '(belum diset)'}\n` +
+          `🌐 Base URL: ${aiConfig.baseUrl || '(belum diset)'}\n` +
+          `⚙️ Config: ${hasConfig ? '✅ Lengkap' : '❌ Belum lengkap'}\n\n` +
+          `📝 *System Prompt:*\n${(aiConfig.systemPrompt || DEFAULT_SYSTEM_PROMPT).slice(0, 300)}${(aiConfig.systemPrompt || '').length > 300 ? '...' : ''}\n\n` +
+          `🔧 *Command:*\n` +
+          `• *${p}aion* — aktifkan AI di chat ini\n` +
+          `• *${p}aioff* — matikan AI\n` +
+          `• *${p}setai <key|model|url>* — konfigurasi\n` +
+          `• *${p}aisystem <prompt>* — ubah system prompt\n` +
+          `• *${p}newchat* — reset memory percakapan`,
+      });
+      break;
+    }
+
+    case 'aion': {
+      if (!aiConfig.apiKey || !aiConfig.model || !aiConfig.baseUrl) {
+        await safeSend(sock, jid, {
+          text: `⚠️ AI belum dikonfigurasi!\n\nGunakan:\n*${p}setai <apikey>|<model>|<baseurl>*\n\nContoh:\n${p}setai sk-xxx|gpt-4o|https://api.openai.com/v1`,
+          quoted: msg,
+        });
+        break;
+      }
+      if (!isPrivateJid(jid)) {
+        await safeSend(sock, jid, { text: `⚠️ AI auto-reply hanya tersedia di *private chat* (biar token gak habis 😅)` });
+        break;
+      }
+      setAiEnabled(jid, true);
+      await safeSend(sock, jid, {
+        text: `✅ *AI Chat AKTIF* di chat ini!\n\n` +
+              `🤖 Model: *${aiConfig.model}*\n` +
+              `📎 Bisa baca: teks, foto, dokumen\n` +
+              `🧠 Memory aktif (ingat percakapan)\n\n` +
+              `💡 Semua pesan di chat ini akan dibalas AI.\n` +
+              `🔄 Matikan: *${p}aioff*\n` +
+              `🗑️ Reset memory: *${p}newchat*`,
+        quoted: msg,
+      });
+      break;
+    }
+
+    case 'aioff': {
+      setAiEnabled(jid, false);
+      await safeSend(sock, jid, {
+        text: `🔕 *AI Chat NONAKTIF* di chat ini.\n\n` +
+              `📌 Pesan tidak akan dibalas AI lagi.\n` +
+              `🔄 Aktifkan: *${p}aion*`,
+        quoted: msg,
+      });
+      break;
+    }
+
+    case 'setai': {
+      if (!args) {
+        const masked = aiConfig.apiKey
+          ? aiConfig.apiKey.slice(0, 6) + '...' + aiConfig.apiKey.slice(-4)
+          : '(kosong)';
+
+        await safeSend(sock, jid, {
+          text:
+            `⚙️ *Konfigurasi AI*\n\n` +
+            `Saat ini:\n` +
+            `🔑 API Key: ${masked}\n` +
+            `🧠 Model: ${aiConfig.model || '(kosong)'}\n` +
+            `🌐 Base URL: ${aiConfig.baseUrl || '(kosong)'}\n\n` +
+            `📝 *Format:*\n` +
+            `*${p}setai <apikey>|<model>|<baseurl>*\n\n` +
+            `Gunakan tanda *-* untuk skip field yang tidak mau diganti.\n\n` +
+            `📋 *Contoh:*\n` +
+            `• Set semua:\n${p}setai sk-xxx|gpt-4o|https://api.openai.com/v1\n\n` +
+            `• Ganti model saja:\n${p}setai -|grok-3|−\n\n` +
+            `• Ganti API key saja:\n${p}setai sk-newkey|-|-\n\n` +
+            `• Ganti model & URL:\n${p}setai -|llama-3|https://api.groq.com/openai/v1`,
+          quoted: msg,
+        });
+        break;
+      }
+
+      const parts = args.split('|').map(s => s.trim());
+      if (parts.length !== 3) {
+        await safeSend(sock, jid, {
+          text: `⚠️ Format harus 3 bagian dipisah *|*\n\n*${p}setai <apikey>|<model>|<baseurl>*\n\nGunakan *-* untuk skip.`,
+          quoted: msg,
+        });
+        break;
+      }
+
+      const [newKey, newModel, newUrl] = parts;
+      let changed = [];
+
+      if (newKey && newKey !== '-') {
+        aiConfig.apiKey = newKey;
+        changed.push('🔑 API Key');
+      }
+      if (newModel && newModel !== '-') {
+        aiConfig.model = newModel;
+        changed.push(`🧠 Model → *${newModel}*`);
+      }
+      if (newUrl && newUrl !== '-') {
+        // Bersihkan trailing slash
+        aiConfig.baseUrl = newUrl.replace(/\/+$/, '');
+        changed.push(`🌐 Base URL → ${aiConfig.baseUrl}`);
+      }
+
+      if (changed.length === 0) {
+        await safeSend(sock, jid, { text: '⚠️ Tidak ada yang diubah.', quoted: msg });
+        break;
+      }
+
+      saveAiConfig();
+      await safeSend(sock, jid, {
+        text: `✅ *AI Config diperbarui!*\n\n${changed.join('\n')}\n\n💡 Aktifkan dengan *${p}aion*`,
+        quoted: msg,
+      });
+      break;
+    }
+
+    case 'aisystem': {
+      if (!args) {
+        await safeSend(sock, jid, {
+          text:
+            `📝 *System Prompt AI*\n\n` +
+            `Saat ini:\n${aiConfig.systemPrompt || DEFAULT_SYSTEM_PROMPT}\n\n` +
+            `Untuk ubah:\n*${p}aisystem <prompt baru>*\n\n` +
+            `Untuk reset ke default:\n*${p}aisystem reset*`,
+          quoted: msg,
+        });
+        break;
+      }
+
+      if (args.toLowerCase() === 'reset') {
+        aiConfig.systemPrompt = DEFAULT_SYSTEM_PROMPT;
+        saveAiConfig();
+        await safeSend(sock, jid, {
+          text: `✅ System prompt direset ke default.`,
+          quoted: msg,
+        });
+        break;
+      }
+
+      aiConfig.systemPrompt = args;
+      saveAiConfig();
+      await safeSend(sock, jid, {
+        text: `✅ *System prompt diperbarui!*\n\n📝 Preview:\n${args.slice(0, 500)}${args.length > 500 ? '...' : ''}`,
+        quoted: msg,
+      });
+      break;
+    }
+
+    case 'newchat': {
+      clearHistory(jid);
+      await safeSend(sock, jid, {
+        text: `🗑️ *Memory AI direset!*\n\n📌 Percakapan baru dimulai dari nol.\n🤖 AI sudah lupa semua chat sebelumnya.`,
+        quoted: msg,
+      });
+      break;
+    }
+
+    default:
+      break;
   }
 }
 

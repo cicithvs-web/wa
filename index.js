@@ -15,6 +15,7 @@ const chalk  = require('chalk');
 const { CONFIG, log, logger } = require('./src/config');
 const { handleUpsert } = require('./src/handler');
 const { reminders, setBotSock, scheduleReminder } = require('./src/reminders');
+const { handleGroupParticipantsUpdate } = require('./src/welcome');
 
 // ============================================================
 // WEB SERVER (liat QR dari browser: /qr)
@@ -123,6 +124,12 @@ async function startBot() {
     sock.ev.on('messages.upsert', (payload) => {
       handleUpsert(sock, payload).catch(err => {
         log.err(`messages.upsert error: ${err.message}`);
+      });
+    });
+
+    sock.ev.on('group-participants.update', (update) => {
+      handleGroupParticipantsUpdate(sock, update).catch(err => {
+        log.err(`group-participants.update error: ${err.message}`);
       });
     });
 

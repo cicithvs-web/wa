@@ -7,18 +7,20 @@ const {
 } = require('@whiskeysockets/baileys');
 const { CONFIG, URL_REGEX, log, stats, logger, isGroupJid, isPrivateJid } = require('./config');
 const { safeSend, reactToMessage } = require('./helpers');
-const { extractViewOnce } = require('./viewonce');
+const { extractViewOnce, saveViewOnce } = require('./viewonce');
 const { isAutoDownloadEnabled } = require('./dl-toggle');
 const { autoReplies, photoHash, sendAutoReply } = require('./autoreply');
 const { detectPlatform, runDownloader, isRecentlyProcessed } = require('./downloader');
 const { tagStates } = require('./tag');
 const { handleCommand } = require('./commands');
+const { getPrefix } = require('./prefix');
+const { handleAiMessage } = require('./ai');
 
 // ============================================================
 // MESSAGES.UPSERT
 // ============================================================
 async function handleUpsert(sock, { messages, type }) {
-  if (type !== 'notify') return;
+  if (type !== 'notify' && type !== 'append') return;
 
   for (const msg of messages) {
     try {
@@ -29,16 +31,17 @@ async function handleUpsert(sock, { messages, type }) {
       if (isJidBroadcast(jid)) continue;
       if (jid === 'status@broadcast') continue;
 
-      // Hitung umur pesan — pesan lama (tertunda saat bot idle) gak perlu
-      // di-auto-download/auto-reply, tapi command (.ping dll) tetap jalan.
+      // Hitung umur pesan — pesan lama (tertunda saat bot idle) gak perlu diproses
       const msgTimestamp = (msg.messageTimestamp?.low ?? msg.messageTimestamp) || 0;
       const msgAgeMs = msgTimestamp > 0 ? Date.now() - msgTimestamp * 1000 : 0;
       const isStale = msgAgeMs > 90_000; // > 90 detik = pesan lama/tertunda
 
       if (isStale) {
-        log.dim(`⏭️ Pesan lama (${Math.round(msgAgeMs / 1000)}d) dari ${jid}, skip heavy processing`);
+        log.dim(`⏭️ Pesan lama (${Math.round(msgAgeMs / 1000)}d) dari ${jid}, skip`);
+        continue;
       }
 
+      const prefix = getPrefix();
       log.dim(`MSG jid=${jid} fromMe=${fromMe} keys=${msgKeys}`);
 
       // ──────────────────────────────────────────────────────
@@ -55,9 +58,9 @@ async function handleUpsert(sock, { messages, type }) {
                         msg.message?.videoMessage?.caption ||
                         null;
 
-          if (msgText && !msgText.startsWith('.')) {
+          if (msgText && !msgText.startsWith(prefix)) {
             const groupMeta = await sock.groupMetadata(jid);
-            const participants = groupMeta.participants.map(p => p.id);
+            const participants = groupMeta.participants.map(pt => pt.id);
 
             if (participants.length > 0) {
               if (isPlainText) {
@@ -117,9 +120,10 @@ async function handleUpsert(sock, { messages, type }) {
 
       if (vo && !fromMe) {
         log.info(`View once detected in ${jid}`);
+        saveViewOnce(sock, msg);
         if (CONFIG.AUTO_REACT) await reactToMessage(sock, msg, '👁️');
         await safeSend(sock, jid, {
-          text: `👁️ *View Once terdeteksi!* Tipe: ${vo.type}`,
+          text: `👁️ *View Once terdeteksi!* Tipe: ${vo.type}\n💡 Ketik *${prefix}open* untuk membuka.`,
           quoted: msg,
         });
         continue;
@@ -134,8 +138,8 @@ async function handleUpsert(sock, { messages, type }) {
           msg.message?.extendedTextMessage?.text || ''
         ).trim();
 
-        // Jangan bentrok sama command (.dl, dst) — itu ditangani di handleCommand
-        if (bodyText && !bodyText.startsWith('.')) {
+        // Jangan bentrok sama command — itu ditangani di handleCommand
+        if (bodyText && !bodyText.startsWith(prefix)) {
           const urlMatch = bodyText.match(URL_REGEX);
           if (urlMatch) {
             const url = urlMatch[0];
@@ -198,15 +202,29 @@ async function handleUpsert(sock, { messages, type }) {
         }
       }
 
+      // ── AI Auto-Reply (private, bukan fromMe, bukan command) ──
+      if (!fromMe && isPrivateJid(jid)) {
+        const aiText =
+          msg.message?.conversation ||
+          msg.message?.extendedTextMessage?.text || '';
+
+        // Jangan proses kalau ini command bot
+        if (!aiText.trim().startsWith(prefix)) {
+          const handled = await handleAiMessage(sock, msg);
+          if (handled) continue;
+        }
+      }
+
       // ── Command ──────────────────────────────────────────
       const cmdText =
         msg.message?.conversation ||
         msg.message?.extendedTextMessage?.text ||
         msg.message?.imageMessage?.caption ||
+        msg.message?.videoMessage?.caption ||
         null;
-      if (fromMe && (!cmdText || !cmdText.trim().startsWith('.'))) continue;
+      if (fromMe && (!cmdText || !cmdText.trim().startsWith(prefix))) continue;
 
-      if (cmdText && cmdText.trim().startsWith('.')) {
+      if (cmdText && cmdText.trim().startsWith(prefix)) {
         log.dim(`CMD from ${jid}: ${cmdText.trim()}`);
         await handleCommand(sock, msg, cmdText.trim());
       }

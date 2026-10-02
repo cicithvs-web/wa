@@ -63,27 +63,65 @@ function extractViewOnce(msg) {
   };
 }
 
+//----------VIEW ONCE CACHE STORE----------
+const viewOnceStore = new Map(); // msgId -> { vo, msg, buffer, timestamp }
+const lastViewOncePerChat = new Map(); // jid -> { vo, msg, buffer, timestamp }
+
+function saveViewOnce(sock, msg) {
+  const vo = extractViewOnce(msg);
+  if (!vo) return null;
+
+  const id = msg.key?.id;
+  const jid = msg.key?.remoteJid;
+  const entry = { vo, msg, buffer: null, timestamp: Date.now() };
+
+  if (id) viewOnceStore.set(id, entry);
+  if (jid) lastViewOncePerChat.set(jid, entry);
+
+  // Pre-download media di background agar saat .open dipanggil media langsung siap
+  if (sock) {
+    downloadMediaMessage(
+      msg, 'buffer', {},
+      { logger, reuploadRequest: sock.updateMediaMessage }
+    ).then((buf) => {
+      if (buf && buf.length > 0) {
+        entry.buffer = buf;
+        log.dim(`Pre-downloaded VO ${id} (${(buf.length / 1024).toFixed(1)} KB)`);
+      }
+    }).catch((err) => {
+      log.dim(`Pre-download VO failed: ${err.message}`);
+    });
+  }
+
+  // Jaga ukuran cache agar tidak menumpuk di memori
+  if (viewOnceStore.size > 100) {
+    const oldestKey = viewOnceStore.keys().next().value;
+    viewOnceStore.delete(oldestKey);
+  }
+
+  return vo;
+}
+
+function getLastViewOnce(jid) {
+  return lastViewOncePerChat.get(jid) || null;
+}
+
+function getViewOnceById(id) {
+  return viewOnceStore.get(id) || null;
+}
+
 //----------PROCESS VIEW ONCE----------
-async function processViewOnce(sock, data, quotedMsg = null) {
+async function processViewOnce(sock, data, triggerMsg = null, targetMsg = null) {
   const { type, media, msg, chatJid } = data;
   const mimetype = media.mimetype || (type === 'audio' ? 'audio/ogg; codecs=opus' : `${type}/unknown`);
 
   log.info(`View Once → type: ${type} | chat: ${chatJid}`);
 
-  const quoted = quotedMsg || msg;
+  const quoted = triggerMsg || targetMsg || msg;
 
   try {
-    await safeSend(sock, chatJid, {
-      text: `👁️ *View Once terdeteksi!* Tipe: ${type}`,
-      quoted,
-    });
-
-    if (CONFIG.AUTO_REACT) {
-      await reactToMessage(sock, msg, '👁️');
-    }
-
-    const buffer = await downloadMediaMessage(
-      msg, 'buffer', {},
+    const buffer = data.buffer || await downloadMediaMessage(
+      targetMsg || msg, 'buffer', {},
       { logger, reuploadRequest: sock.updateMediaMessage }
     );
     if (!buffer || buffer.length === 0) throw new Error('Buffer kosong');
@@ -91,7 +129,8 @@ async function processViewOnce(sock, data, quotedMsg = null) {
     stats.inc(type);
     log.ok(`Downloaded ${type} (${(buffer.length / 1024).toFixed(1)} KB)`);
 
-    const caption = `😹 ${(buffer.length / 1024).toFixed(1)} KB`;
+    const origCaption = media.caption ? `\n💬 *Caption:* ${media.caption}` : '';
+    const caption = `🔓 *View Once (${type})*\n📦 Size: ${(buffer.length / 1024).toFixed(1)} KB${origCaption}`;
     const opts = { quoted };
 
     if (type === 'image') {
@@ -106,6 +145,10 @@ async function processViewOnce(sock, data, quotedMsg = null) {
       }, opts);
     }
 
+    if (CONFIG.AUTO_REACT && triggerMsg) {
+      await reactToMessage(sock, triggerMsg, '🔓');
+    }
+
     log.ok(`Sent back ${type} to ${chatJid}`);
 
   } catch (err) {
@@ -118,4 +161,10 @@ async function processViewOnce(sock, data, quotedMsg = null) {
   }
 }
 
-module.exports = { extractViewOnce, processViewOnce };
+module.exports = {
+  extractViewOnce,
+  processViewOnce,
+  saveViewOnce,
+  getLastViewOnce,
+  getViewOnceById,
+};
