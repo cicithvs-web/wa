@@ -1044,15 +1044,35 @@ async function handleCommand(sock, msg, text) {
           : `Jawab, jelaskan, atau tanggapi pesan berikut:\n"${quotedText}"`;
       }
 
+      // Foto: reply ke foto/stiker, atau kirim foto dengan caption .ask
+      let image = null;
+      const quotedImg = quotedMsg?.imageMessage || quotedMsg?.stickerMessage;
+      const selfImg = msg.message?.imageMessage;
+      if ((quotedImg && quotedId) || selfImg) {
+        try {
+          const srcMsg = selfImg ? msg : replyTargetMsg;
+          const imgBuf = await downloadMediaMessage(srcMsg, 'buffer', {}, {
+            logger, reuploadRequest: sock.updateMediaMessage,
+          });
+          const mime = (selfImg || quotedImg).mimetype || 'image/jpeg';
+          image = { base64: imgBuf.toString('base64'), mime };
+          if (!promptText) promptText = 'Jelaskan gambar ini.';
+        } catch (e) {
+          log.err(`ask image read error: ${e.message}`);
+          await safeSend(sock, jid, { text: `Gagal membaca foto: ${e.message}`, quoted: msg });
+          break;
+        }
+      }
+
       if (!promptText) {
         await safeSend(sock, jid, {
-          text: `⚠️ Format: *${p}ask <pertanyaan>*\nAtau reply ke pesan/file (ZIP/PDF/teks) lalu ketik *${p}ask <instruksi>*`,
+          text: `⚠️ Format: *${p}ask <pertanyaan>*\nAtau reply ke pesan/foto/file (ZIP/PDF/teks) lalu ketik *${p}ask <instruksi>*`,
           quoted: msg,
         });
         break;
       }
 
-      await askStatelessAI(sock, jid, promptText, replyTargetMsg);
+      await askStatelessAI(sock, jid, promptText, replyTargetMsg, image);
       break;
     }
 

@@ -601,7 +601,7 @@ async function sendLongWhatsApp(sock, jid, text, quotedMsg) {
 // ============================================================
 // STATELESS AI ASK (untuk command .ask di grup atau private)
 // ============================================================
-async function askStatelessAI(sock, jid, promptText, replyTargetMsg) {
+async function askStatelessAI(sock, jid, promptText, replyTargetMsg, image = null) {
   if (!aiConfig.apiKey || !aiConfig.model || !aiConfig.baseUrl) {
     await safeSend(sock, jid, {
       text: '❌ AI belum dikonfigurasi (API key / model / base URL belum diisi). Hubungi owner.',
@@ -615,9 +615,15 @@ async function askStatelessAI(sock, jid, promptText, replyTargetMsg) {
     await sock.sendPresenceUpdate('composing', jid);
 
     const sysPrompt = aiConfig.systemPrompt || DEFAULT_SYSTEM_PROMPT;
+    const userContent = image
+      ? [
+          { type: 'text', text: promptText },
+          { type: 'image_url', image_url: { url: `data:${image.mime};base64,${image.base64}` } },
+        ]
+      : promptText;
     const messages = [
       { role: 'system', content: sysPrompt },
-      { role: 'user', content: promptText },
+      { role: 'user', content: userContent },
     ];
 
     const rawAnswer = await callAI(messages);

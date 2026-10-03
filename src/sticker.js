@@ -181,7 +181,9 @@ async function convertMediaToAudio(buffer, isVn = false) {
     fs.writeFileSync(tmpIn, buffer);
 
     const args = isVn
-      ? ['-y', '-i', tmpIn, '-vn', '-c:a', 'libopus', '-b:a', '64k', '-vbr', 'on', tmpOut]
+      ? ['-y', '-i', tmpIn, '-vn', '-map_metadata', '-1',
+         '-c:a', 'libopus', '-b:a', '64k', '-ac', '1', '-ar', '48000',
+         '-application', 'voip', '-f', 'ogg', tmpOut]
       : ['-y', '-i', tmpIn, '-vn', '-c:a', 'libmp3lame', '-b:a', '192k', tmpOut];
 
     execFile('ffmpeg', args, (err, _stdout, stderr) => {
