@@ -170,4 +170,36 @@ async function convertStickerToMedia(sock, jid, msg, type = 'image') {
   }
 }
 
-module.exports = { sendSticker, convertStickerToMedia };
+//------CONVERT MEDIA TO AUDIO / VN------
+async function convertMediaToAudio(buffer, isVn = false) {
+  return new Promise((resolve, reject) => {
+    const ts = Date.now();
+    const tmpIn = path.join(TMP_DIR, `aud_in_${ts}`);
+    const ext = isVn ? 'ogg' : 'mp3';
+    const tmpOut = path.join(TMP_DIR, `aud_out_${ts}.${ext}`);
+
+    fs.writeFileSync(tmpIn, buffer);
+
+    const args = isVn
+      ? ['-y', '-i', tmpIn, '-vn', '-c:a', 'libopus', '-b:a', '64k', '-vbr', 'on', tmpOut]
+      : ['-y', '-i', tmpIn, '-vn', '-c:a', 'libmp3lame', '-b:a', '192k', tmpOut];
+
+    execFile('ffmpeg', args, (err, _stdout, stderr) => {
+      try { fs.unlinkSync(tmpIn); } catch (_) {}
+      if (err) {
+        try { fs.unlinkSync(tmpOut); } catch (_) {}
+        const hint = (stderr || '').split('\n').filter(l => /error|invalid/i.test(l)).slice(0, 2).join(' | ');
+        return reject(new Error('ffmpeg error: ' + (hint || err.message)));
+      }
+      try {
+        const out = fs.readFileSync(tmpOut);
+        fs.unlinkSync(tmpOut);
+        resolve(out);
+      } catch (readErr) {
+        reject(readErr);
+      }
+    });
+  });
+}
+
+module.exports = { sendSticker, convertStickerToMedia, convertMediaToAudio };

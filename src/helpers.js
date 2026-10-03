@@ -2,9 +2,15 @@
 
 const { log } = require('./config');
 
-async function safeSend(sock, jid, content) {
+async function safeSend(sock, jid, content, options = {}) {
   try {
-    return await sock.sendMessage(jid, content);
+    const opts = { ...options };
+    const payload = { ...content };
+    if (payload.quoted) {
+      if (!opts.quoted) opts.quoted = payload.quoted;
+      delete payload.quoted;
+    }
+    return await sock.sendMessage(jid, payload, opts);
   } catch (e) {
     log.warn(`safeSend failed to ${jid}: ${e.message}`);
     return null;

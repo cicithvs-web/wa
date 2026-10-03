@@ -8,7 +8,7 @@ const { safeSend } = require('./helpers');
 const { extractViewOnce, processViewOnce, getLastViewOnce, getViewOnceById } = require('./viewonce');
 const { tagStates, saveTagStates } = require('./tag');
 const { dlOffStates, saveDlOffStates, isAutoDownloadEnabled } = require('./dl-toggle');
-const { sendSticker, convertStickerToMedia } = require('./sticker');
+const { sendSticker, convertStickerToMedia, convertMediaToAudio } = require('./sticker');
 const { detectPlatform, runDownloader } = require('./downloader');
 const { captureQuotedContent, addReminder, cancelReminder, listReminders, formatDueAt } = require('./reminders');
 const { autoReplies, saveAutoReplies, photoHash, PHOTO_STORE_DIR } = require('./autoreply');
@@ -19,7 +19,7 @@ const {
 } = require('./welcome');
 const {
   aiConfig, saveAiConfig, isAiEnabled, setAiEnabled,
-  clearHistory, DEFAULT_SYSTEM_PROMPT,
+  clearHistory, DEFAULT_SYSTEM_PROMPT, askStatelessAI, extractDocumentText,
 } = require('./ai');
 
 //----------COMMAND HANDLER----------
@@ -39,7 +39,7 @@ async function handleCommand(sock, msg, text) {
     const fromMe = !!msg.key?.fromMe;
     if (!fromMe) {
       await safeSend(sock, jid, {
-        text: `❌ *Fitur ini hanya untuk owner*\n\n⚠️ Command *${p}${cmd}* cuma bisa dipakai dari akun owner (fromMe).`,
+        text: `Owner only.`,
         quoted: msg,
       });
       return;
@@ -61,7 +61,9 @@ async function handleCommand(sock, msg, text) {
           `│  ├ • *${p}open*\n` +
           `│  ├ • *${p}sticker*\n` +
           `│  ├ • *${p}toimage*\n` +
-          `│  └ • *${p}tovideo*\n` +
+          `│  ├ • *${p}tovideo*\n` +
+          `│  ├ • *${p}tomp3* / *${p}toaudio*\n` +
+          `│  └ • *${p}tovn*\n` +
           `│\n` +
 
           `├─ *Downloader*\n` +
@@ -82,10 +84,12 @@ async function handleCommand(sock, msg, text) {
           `│  ├ • *${p}setwelcome <pesan>*\n` +
           `│  ├ • *${p}setbye <pesan>*\n` +
           `│  ├ • *${p}tag* / *${p}tagon* / *${p}tagoff*\n` +
+          `│  ├ • *${p}hidetag <pesan>*\n` +
           `│  └ • Placeholder: {name} {group} {count}\n` +
           `│\n` +
 
           `├─ *AI Chat*\n` +
+          `│  ├ • *${p}ask <pertanyaan>*\n` +
           `│  ├ • *${p}ai* / *${p}aion* / *${p}aioff*\n` +
           `│  ├ • *${p}setai key|model|url*\n` +
           `│  ├ • *${p}aisystem <prompt>*\n` +
@@ -207,12 +211,7 @@ async function handleCommand(sock, msg, text) {
       const count = groupMeta.participants.length;
 
       await safeSend(sock, jid, {
-        text: `📊 *Status Bot Auto-Tag*\n\n` +
-              `📌 Grup: ${groupMeta.subject}\n` +
-              `👥 Member: ${count} orang\n` +
-              `🔔 Status: ${isActive ? '✅ AKTIF' : '❌ NONAKTIF'}\n` +
-              `👻 Mode: INVISIBLE (tanpa @)\n\n` +
-              `${isActive ? `🔄 ${p}tagoff untuk matikan` : `🔄 ${p}tagon untuk aktifkan`}`,
+        text: `*Auto-Tag:* ${isActive ? 'ON' : 'OFF'}\n${groupMeta.subject} (${count} member)\n\n${isActive ? `${p}tagoff untuk matikan` : `${p}tagon untuk aktifkan`}`,
       });
       break;
     }
@@ -230,10 +229,7 @@ async function handleCommand(sock, msg, text) {
       const count = groupMeta.participants.length;
 
       await safeSend(sock, jid, {
-        text: `🔔 *Bot Auto-Tag ALL AKTIF!*\n\n` +
-              `📌 Setiap pesan BOT akan otomatis ngetag *${count}* member\n` +
-              `👻 TAPI *TANPA* @ muncul di chat!\n` +
-              `🚫 Matikan dengan *${p}tagoff*`,
+        text: `Auto-Tag *ON* — ${count} member ditag invisible.\nMatikan: *${p}tagoff*`,
       });
       break;
     }
@@ -248,9 +244,55 @@ async function handleCommand(sock, msg, text) {
       saveTagStates();
 
       await safeSend(sock, jid, {
-        text: `🔕 *Bot Auto-Tag ALL NONAKTIF!*\n\n` +
-              `📌 Pesan BOT akan dikirim normal tanpa tag.\n` +
-              `🔄 Aktifkan lagi dengan *${p}tagon*`,
+        text: `Auto-Tag *OFF*.\nAktifkan: *${p}tagon*`,
+      });
+      break;
+    }
+
+    case 'hidetag': {
+      if (!isGroupJid(jid)) {
+        await safeSend(sock, jid, { text: `⚠️ ${p}hidetag hanya bisa di grup!`, quoted: msg });
+        break;
+      }
+
+      const groupMeta = await sock.groupMetadata(jid);
+      const participants = groupMeta.participants.map(pt => pt.id);
+      if (participants.length === 0) {
+        await safeSend(sock, jid, { text: `⚠️ Tidak ada member yang bisa di-tag.`, quoted: msg });
+        break;
+      }
+
+      const ctxInfo = msg.message?.extendedTextMessage?.contextInfo;
+      const quotedMsg = ctxInfo?.quotedMessage;
+
+      let tagText = args.trim();
+      if (!tagText && quotedMsg) {
+        tagText =
+          quotedMsg.conversation ||
+          quotedMsg.extendedTextMessage?.text ||
+          quotedMsg.imageMessage?.caption ||
+          quotedMsg.videoMessage?.caption ||
+          '';
+      }
+
+      if (!tagText) {
+        tagText = '📢 *Announcement*';
+      }
+
+      const replyTarget = (quotedMsg && ctxInfo?.stanzaId) ? {
+        key: {
+          remoteJid: jid,
+          fromMe: ctxInfo?.participant ? ctxInfo.participant === sock.user?.id : false,
+          id: ctxInfo.stanzaId,
+          participant: ctxInfo?.participant || jid,
+        },
+        message: quotedMsg,
+      } : null;
+
+      await safeSend(sock, jid, {
+        text: tagText,
+        mentions: participants,
+        ...(replyTarget ? { quoted: replyTarget } : {}),
       });
       break;
     }
@@ -267,15 +309,12 @@ async function handleCommand(sock, msg, text) {
       const groupMeta = await sock.groupMetadata(jid);
       await safeSend(sock, jid, {
         text:
-          `📊 *Welcome/Goodbye Status*\n\n` +
-          `📌 Grup: ${groupMeta.subject}\n` +
-          `🔔 Status: ${ws?.enabled ? '✅ AKTIF' : '❌ NONAKTIF'}\n\n` +
-          `👋 *Pesan Welcome:*\n${ws?.welcomeMsg || DEFAULT_WELCOME}\n\n` +
-          `👋 *Pesan Goodbye:*\n${ws?.byeMsg || DEFAULT_BYE}\n\n` +
-          `📝 *Placeholder:* {name} {group} {count}\n\n` +
-          `🔧 *${p}setwelcome <pesan>* — ubah welcome\n` +
-          `🔧 *${p}setbye <pesan>* — ubah goodbye\n` +
-          `${ws?.enabled ? `🔄 *${p}weloff* untuk matikan` : `🔄 *${p}welon* untuk aktifkan`}`,
+          `*Welcome/Goodbye:* ${ws?.enabled ? 'ON' : 'OFF'}\nGrup: ${groupMeta.subject}\n\n` +
+          `*Welcome:*\n${ws?.welcomeMsg || DEFAULT_WELCOME}\n\n` +
+          `*Goodbye:*\n${ws?.byeMsg || DEFAULT_BYE}\n\n` +
+          `Placeholder: {name} {group} {count}\n` +
+          `${p}setwelcome / ${p}setbye — ubah pesan\n` +
+          `${ws?.enabled ? `${p}weloff — matikan` : `${p}welon — aktifkan`}`,
       });
       break;
     }
@@ -287,9 +326,7 @@ async function handleCommand(sock, msg, text) {
       }
       setWelcomeEnabled(jid, true);
       await safeSend(sock, jid, {
-        text: `✅ *Welcome/Goodbye AKTIF!*\n\n` +
-              `📌 Bot akan menyapa member baru & pamitkan yang keluar.\n` +
-              `🔄 Matikan: *${p}weloff*`,
+        text: `Welcome/Goodbye *ON*.\nMatikan: *${p}weloff*`,
       });
       break;
     }
@@ -301,9 +338,7 @@ async function handleCommand(sock, msg, text) {
       }
       setWelcomeEnabled(jid, false);
       await safeSend(sock, jid, {
-        text: `🔕 *Welcome/Goodbye NONAKTIF!*\n\n` +
-              `📌 Bot tidak akan menyapa member baru lagi.\n` +
-              `🔄 Aktifkan: *${p}welon*`,
+        text: `Welcome/Goodbye *OFF*.\nAktifkan: *${p}welon*`,
       });
       break;
     }
@@ -324,7 +359,7 @@ async function handleCommand(sock, msg, text) {
       }
       setWelcomeMsg(jid, args);
       await safeSend(sock, jid, {
-        text: `✅ *Pesan welcome diperbarui!*\n\n📝 Preview:\n${args}`,
+        text: `Pesan welcome diperbarui.\n\n${args}`,
         quoted: msg,
       });
       break;
@@ -346,7 +381,7 @@ async function handleCommand(sock, msg, text) {
       }
       setByeMsg(jid, args);
       await safeSend(sock, jid, {
-        text: `✅ *Pesan goodbye diperbarui!*\n\n📝 Preview:\n${args}`,
+        text: `Pesan goodbye diperbarui.\n\n${args}`,
         quoted: msg,
       });
       break;
@@ -359,10 +394,7 @@ async function handleCommand(sock, msg, text) {
       dlOffStates.set(jid, true);
       saveDlOffStates();
       await safeSend(sock, jid, {
-        text: `🔕 *Auto-download link DIMATIKAN* di chat ini.\n\n` +
-              `📌 Link TikTok/IG/X/FB/YouTube yang dikirim di sini gak bakal auto-download lagi.\n` +
-              `💡 *${p}dl <link>* tetap bisa dipakai manual.\n` +
-              `🔄 Aktifkan lagi dengan *${p}dlon*`,
+        text: `Auto-download *OFF*.\n*${p}dl <link>* tetap bisa manual.\nAktifkan: *${p}dlon*`,
         quoted: msg,
       });
       break;
@@ -372,8 +404,7 @@ async function handleCommand(sock, msg, text) {
       dlOffStates.delete(jid);
       saveDlOffStates();
       await safeSend(sock, jid, {
-        text: `🔔 *Auto-download link AKTIF* lagi di chat ini.\n\n` +
-              `📌 Kirim link TikTok/IG/X/FB/YouTube langsung auto-download.`,
+        text: `Auto-download *ON*.`,
         quoted: msg,
       });
       break;
@@ -382,19 +413,44 @@ async function handleCommand(sock, msg, text) {
     case 'dlstatus': {
       const enabled = isAutoDownloadEnabled(jid);
       await safeSend(sock, jid, {
-        text: `📊 *Status Auto-Download di chat ini:*\n` +
-              `${enabled ? '✅ AKTIF' : '❌ NONAKTIF'}\n\n` +
-              `${enabled ? `🔄 ${p}dloff untuk matikan` : `🔄 ${p}dlon untuk aktifkan`}`,
+        text: `Auto-Download: *${enabled ? 'ON' : 'OFF'}*`,
         quoted: msg,
       });
       break;
     }
 
     case 'dl': {
-      const urlMatch = args.match(URL_REGEX);
+      const ctxInfo   = msg.message?.extendedTextMessage?.contextInfo;
+      const quotedMsg = ctxInfo?.quotedMessage;
+      const quotedId  = ctxInfo?.stanzaId;
+
+      let urlMatch = args.match(URL_REGEX);
+      let targetQuoted = msg;
+
+      if (!urlMatch && quotedMsg) {
+        const quotedText =
+          quotedMsg.conversation ||
+          quotedMsg.extendedTextMessage?.text ||
+          quotedMsg.imageMessage?.caption ||
+          quotedMsg.videoMessage?.caption ||
+          '';
+        urlMatch = quotedText.match(URL_REGEX);
+        if (urlMatch && quotedId) {
+          targetQuoted = {
+            key: {
+              remoteJid: jid,
+              fromMe: ctxInfo?.participant ? ctxInfo.participant === sock.user?.id : false,
+              id: quotedId,
+              participant: ctxInfo?.participant || jid,
+            },
+            message: quotedMsg,
+          };
+        }
+      }
+
       if (!urlMatch) {
         await safeSend(sock, jid, {
-          text: `⚠️ Format: *${p}dl <link>*\n\nContoh: ${p}dl https://vt.tiktok.com/xxxxx`,
+          text: `⚠️ Format: *${p}dl <link>*\nAtau reply ke pesan berisi link lalu ketik *${p}dl*`,
           quoted: msg,
         });
         break;
@@ -414,7 +470,7 @@ async function handleCommand(sock, msg, text) {
       const statusMsg = await safeSend(sock, jid, { text: '⏳ Lagi download, tunggu sebentar...', quoted: msg });
 
       try {
-        await runDownloader(sock, jid, url, platform, msg);
+        await runDownloader(sock, jid, url, platform, targetQuoted);
         if (statusMsg) { try { await sock.sendMessage(jid, { delete: statusMsg.key }); } catch (_) {} }
         log.ok(`✅ Download berhasil untuk ${platform}`);
       } catch (err) {
@@ -576,6 +632,87 @@ async function handleCommand(sock, msg, text) {
       break;
     }
 
+    case 'tomp3':
+    case 'toaudio':
+    case 'tovn': {
+      const isVn = cmd === 'tovn';
+      const ctxInfo = msg.message?.extendedTextMessage?.contextInfo;
+      const quotedMsg = ctxInfo?.quotedMessage;
+      const quotedId = ctxInfo?.stanzaId;
+
+      let targetMsg = null;
+      let hasMedia = false;
+
+      if (msg.message?.videoMessage || msg.message?.audioMessage) {
+        targetMsg = msg;
+        hasMedia = true;
+      } else if (quotedMsg && (quotedMsg.videoMessage || quotedMsg.audioMessage)) {
+        targetMsg = {
+          key: {
+            remoteJid: jid,
+            fromMe: false,
+            id: quotedId,
+            participant: ctxInfo?.participant || jid,
+          },
+          message: quotedMsg,
+        };
+        hasMedia = true;
+      }
+
+      if (!hasMedia || !targetMsg) {
+        await safeSend(sock, jid, {
+          text: `⚠️ Reply ke *video* atau *audio*, lalu ketik *${p}${cmd}*`,
+          quoted: msg,
+        });
+        break;
+      }
+
+      try {
+        await safeSend(sock, jid, {
+          text: `⏳ Mengonversi ke ${isVn ? 'Voice Note' : 'Audio MP3'}...`,
+          quoted: msg,
+        });
+
+        const buffer = await downloadMediaMessage(
+          targetMsg,
+          'buffer',
+          {},
+          { logger, reuploadRequest: sock.updateMediaMessage }
+        );
+
+        if (!buffer || buffer.length === 0) {
+          throw new Error('Buffer media kosong');
+        }
+
+        const outAudio = await convertMediaToAudio(buffer, isVn);
+
+        if (isVn) {
+          await safeSend(sock, jid, {
+            audio: outAudio,
+            mimetype: 'audio/ogg; codecs=opus',
+            ptt: true,
+            quoted: msg,
+          });
+        } else {
+          await safeSend(sock, jid, {
+            audio: outAudio,
+            mimetype: 'audio/mpeg',
+            fileName: 'audio.mp3',
+            quoted: msg,
+          });
+        }
+
+        log.ok(`✅ Converted media to ${isVn ? 'VN' : 'MP3'} (${(outAudio.length / 1024).toFixed(1)} KB)`);
+      } catch (e) {
+        log.err(`Audio convert failed: ${e.message}`);
+        await safeSend(sock, jid, {
+          text: `❌ Gagal convert audio: ${e.message}`,
+          quoted: msg,
+        });
+      }
+      break;
+    }
+
     // ============================================================
     // SCHEDULER / REMINDER
     // ============================================================
@@ -610,11 +747,10 @@ async function handleCommand(sock, msg, text) {
         const r = addReminder(jid, content, intervalMs);
         await safeSend(sock, jid, {
           text:
-            `⏰ *Reminder #${r.id} diset!*\n` +
-            `🔁 Diulang tiap ${secArg} detik, terus-menerus\n` +
-            `📅 Kirim pertama: ${formatDueAt(r.dueAt)}\n` +
-            `📎 Tipe: ${content.type}\n\n` +
-            `_Stop kapan aja: ${p}delremind ${r.id}_`,
+            `Reminder #${r.id} diset.\n` +
+            `Tiap ${secArg}d | tipe: ${content.type}\n` +
+            `Pertama: ${formatDueAt(r.dueAt)}\n\n` +
+            `Stop: *${p}delremind ${r.id}*`,
           quoted: msg,
         });
       } catch (e) {
@@ -636,7 +772,7 @@ async function handleCommand(sock, msg, text) {
         return `#${r.id} - tiap ${r.intervalMs / 1000}d - berikutnya ${formatDueAt(r.dueAt)}\n   ${preview}`;
       }).join('\n\n');
       await safeSend(sock, jid, {
-        text: `⏰ *Reminder Aktif (${list.length})*\n\n${body}\n\n_Hapus: ${p}delremind <id>_`,
+        text: `*Reminder Aktif (${list.length})*\n\n${body}\n\nHapus: *${p}delremind <id>*`,
       });
       break;
     }
@@ -676,9 +812,7 @@ async function handleCommand(sock, msg, text) {
         const oldPrefix = p;
         setPrefix(newPrefix);
         await safeSend(sock, jid, {
-          text: `✅ *Prefix diubah!*\n\n` +
-                `📌 *${oldPrefix}* → *${newPrefix}*\n\n` +
-                `💡 Sekarang gunakan *${newPrefix}help* untuk melihat menu.`,
+          text: `Prefix diubah: *${oldPrefix}* → *${newPrefix}*\nGunakan *${newPrefix}help* untuk menu.`,
           quoted: msg,
         });
       } catch (e) {
@@ -829,10 +963,7 @@ async function handleCommand(sock, msg, text) {
       const valLabel  = replyEntry.type === 'photo' ? '📸 foto' : replyEntry.value;
       log.ok(`Auto-reply set: "${trigger}" -> ${valLabel}`);
       await safeSend(sock, jid, {
-        text: `✅ *Auto-reply disimpan!*
-
-📌 Trigger : ${trigLabel}
-💬 Balasan : ${valLabel}`,
+        text: `Auto-reply disimpan.\nTrigger: ${trigLabel}\nBalasan: ${valLabel}`,
         quoted: msg,
       });
       break;
@@ -841,6 +972,90 @@ async function handleCommand(sock, msg, text) {
     // ============================================================
     // AI CHAT
     // ============================================================
+    case 'ask': {
+      const ctxInfo   = msg.message?.extendedTextMessage?.contextInfo;
+      const quotedMsg = ctxInfo?.quotedMessage;
+      const quotedId  = ctxInfo?.stanzaId;
+
+      const replyTargetMsg = (quotedMsg && quotedId) ? {
+        key: {
+          remoteJid: jid,
+          fromMe: ctxInfo?.participant ? ctxInfo.participant === sock.user?.id : false,
+          id: quotedId,
+          participant: ctxInfo?.participant || jid,
+        },
+        message: quotedMsg,
+      } : msg;
+
+      let promptText = args.trim();
+      let docContent = null;
+      let docName = null;
+
+      // Kalau reply ke dokumen (ZIP / PDF / teks) → ekstrak isinya
+      const quotedDoc = quotedMsg?.documentMessage;
+      if (quotedDoc && quotedId) {
+        docName = quotedDoc.fileName || 'unknown';
+        const docCaption = quotedDoc.caption || '';
+        try {
+          await safeSend(sock, jid, { text: `⏳ Membaca *${docName}*...`, quoted: msg });
+          const docBuf = await downloadMediaMessage(replyTargetMsg, 'buffer', {}, {
+            logger, reuploadRequest: sock.updateMediaMessage,
+          });
+          const extracted = await extractDocumentText(docBuf, docName);
+          if (extracted) {
+            docContent = extracted.length > 100_000
+              ? extracted.slice(0, 100_000) + '\n\n[...dipotong]'
+              : extracted;
+          } else {
+            await safeSend(sock, jid, {
+              text: `⚠️ Tidak ada teks yang bisa dibaca dari *${docName}*.`,
+              quoted: msg,
+            });
+            break;
+          }
+          if (!promptText && docCaption) promptText = docCaption;
+        } catch (e) {
+          log.err(`ask doc read error: ${e.message}`);
+          await safeSend(sock, jid, {
+            text: `❌ Gagal membaca *${docName}*: ${e.message}`,
+            quoted: msg,
+          });
+          break;
+        }
+      }
+
+      let quotedText = null;
+      if (quotedMsg && !quotedDoc) {
+        quotedText =
+          quotedMsg.conversation ||
+          quotedMsg.extendedTextMessage?.text ||
+          quotedMsg.imageMessage?.caption ||
+          quotedMsg.videoMessage?.caption ||
+          null;
+      }
+
+      if (docContent) {
+        promptText = promptText
+          ? `[Isi file ${docName}]:\n${docContent}\n\n[Pertanyaan/Instruksi]: ${promptText}`
+          : `Berikut isi file ${docName}:\n\n${docContent}\n\nJelaskan atau rangkum isi file tersebut.`;
+      } else if (quotedText) {
+        promptText = promptText
+          ? `[Pesan yang di-reply]: "${quotedText}"\n\n[Pertanyaan/Instruksi]: ${promptText}`
+          : `Jawab, jelaskan, atau tanggapi pesan berikut:\n"${quotedText}"`;
+      }
+
+      if (!promptText) {
+        await safeSend(sock, jid, {
+          text: `⚠️ Format: *${p}ask <pertanyaan>*\nAtau reply ke pesan/file (ZIP/PDF/teks) lalu ketik *${p}ask <instruksi>*`,
+          quoted: msg,
+        });
+        break;
+      }
+
+      await askStatelessAI(sock, jid, promptText, replyTargetMsg);
+      break;
+    }
+
     case 'ai': {
       const enabled = isAiEnabled(jid);
       const hasConfig = !!(aiConfig.apiKey && aiConfig.model && aiConfig.baseUrl);
@@ -850,19 +1065,15 @@ async function handleCommand(sock, msg, text) {
 
       await safeSend(sock, jid, {
         text:
-          `🤖 *AI Chat Status*\n\n` +
-          `🔔 Status: ${enabled ? '✅ AKTIF' : '❌ NONAKTIF'}\n` +
-          `🔑 API Key: ${masked}\n` +
-          `🧠 Model: ${aiConfig.model || '(belum diset)'}\n` +
-          `🌐 Base URL: ${aiConfig.baseUrl || '(belum diset)'}\n` +
-          `⚙️ Config: ${hasConfig ? '✅ Lengkap' : '❌ Belum lengkap'}\n\n` +
-          `📝 *System Prompt:*\n${(aiConfig.systemPrompt || DEFAULT_SYSTEM_PROMPT).slice(0, 300)}${(aiConfig.systemPrompt || '').length > 300 ? '...' : ''}\n\n` +
-          `🔧 *Command:*\n` +
-          `• *${p}aion* — aktifkan AI di chat ini\n` +
-          `• *${p}aioff* — matikan AI\n` +
-          `• *${p}setai <key|model|url>* — konfigurasi\n` +
-          `• *${p}aisystem <prompt>* — ubah system prompt\n` +
-          `• *${p}newchat* — reset memory percakapan`,
+          `*AI Chat:* ${enabled ? 'ON' : 'OFF'} | Config: ${hasConfig ? 'OK' : 'belum lengkap'}\n` +
+          `Key: ${masked}\n` +
+          `Model: ${aiConfig.model || '-'}\n` +
+          `URL: ${aiConfig.baseUrl || '-'}\n\n` +
+          `*System Prompt:*\n${(aiConfig.systemPrompt || DEFAULT_SYSTEM_PROMPT).slice(0, 300)}${(aiConfig.systemPrompt || '').length > 300 ? '...' : ''}\n\n` +
+          `${p}aion / ${p}aioff — toggle\n` +
+          `${p}setai — konfigurasi\n` +
+          `${p}aisystem — ubah prompt\n` +
+          `${p}newchat — reset memory`,
       });
       break;
     }
@@ -881,13 +1092,7 @@ async function handleCommand(sock, msg, text) {
       }
       setAiEnabled(jid, true);
       await safeSend(sock, jid, {
-        text: `✅ *AI Chat AKTIF* di chat ini!\n\n` +
-              `🤖 Model: *${aiConfig.model}*\n` +
-              `📎 Bisa baca: teks, foto, dokumen\n` +
-              `🧠 Memory aktif (ingat percakapan)\n\n` +
-              `💡 Semua pesan di chat ini akan dibalas AI.\n` +
-              `🔄 Matikan: *${p}aioff*\n` +
-              `🗑️ Reset memory: *${p}newchat*`,
+        text: `AI Chat *ON* — Model: *${aiConfig.model}*\nBisa baca: teks, foto, dokumen.\nMatikan: *${p}aioff* | Reset: *${p}newchat*`,
         quoted: msg,
       });
       break;
@@ -896,9 +1101,7 @@ async function handleCommand(sock, msg, text) {
     case 'aioff': {
       setAiEnabled(jid, false);
       await safeSend(sock, jid, {
-        text: `🔕 *AI Chat NONAKTIF* di chat ini.\n\n` +
-              `📌 Pesan tidak akan dibalas AI lagi.\n` +
-              `🔄 Aktifkan: *${p}aion*`,
+        text: `AI Chat *OFF*.\nAktifkan: *${p}aion*`,
         quoted: msg,
       });
       break;
@@ -912,19 +1115,12 @@ async function handleCommand(sock, msg, text) {
 
         await safeSend(sock, jid, {
           text:
-            `⚙️ *Konfigurasi AI*\n\n` +
-            `Saat ini:\n` +
-            `🔑 API Key: ${masked}\n` +
-            `🧠 Model: ${aiConfig.model || '(kosong)'}\n` +
-            `🌐 Base URL: ${aiConfig.baseUrl || '(kosong)'}\n\n` +
-            `📝 *Format:*\n` +
-            `*${p}setai <apikey>|<model>|<baseurl>*\n\n` +
-            `Gunakan tanda *-* untuk skip field yang tidak mau diganti.\n\n` +
-            `📋 *Contoh:*\n` +
-            `• Set semua:\n${p}setai sk-xxx|gpt-4o|https://api.openai.com/v1\n\n` +
-            `• Ganti model saja:\n${p}setai -|grok-3|−\n\n` +
-            `• Ganti API key saja:\n${p}setai sk-newkey|-|-\n\n` +
-            `• Ganti model & URL:\n${p}setai -|llama-3|https://api.groq.com/openai/v1`,
+            `*Konfigurasi AI*\n\n` +
+            `Key: ${masked}\nModel: ${aiConfig.model || '-'}\nURL: ${aiConfig.baseUrl || '-'}\n\n` +
+            `Format: *${p}setai <key>|<model>|<url>*\nPakai *-* untuk skip field.\n\n` +
+            `Contoh:\n` +
+            `${p}setai sk-xxx|gpt-4o|https://api.openai.com/v1\n` +
+            `${p}setai -|grok-3|-`,
           quoted: msg,
         });
         break;
@@ -963,7 +1159,7 @@ async function handleCommand(sock, msg, text) {
 
       saveAiConfig();
       await safeSend(sock, jid, {
-        text: `✅ *AI Config diperbarui!*\n\n${changed.join('\n')}\n\n💡 Aktifkan dengan *${p}aion*`,
+        text: `AI config diperbarui.\n${changed.join('\n')}\n\nAktifkan: *${p}aion*`,
         quoted: msg,
       });
       break;
@@ -973,10 +1169,8 @@ async function handleCommand(sock, msg, text) {
       if (!args) {
         await safeSend(sock, jid, {
           text:
-            `📝 *System Prompt AI*\n\n` +
-            `Saat ini:\n${aiConfig.systemPrompt || DEFAULT_SYSTEM_PROMPT}\n\n` +
-            `Untuk ubah:\n*${p}aisystem <prompt baru>*\n\n` +
-            `Untuk reset ke default:\n*${p}aisystem reset*`,
+            `*System Prompt AI*\n\n${aiConfig.systemPrompt || DEFAULT_SYSTEM_PROMPT}\n\n` +
+            `Ubah: *${p}aisystem <prompt>*\nReset: *${p}aisystem reset*`,
           quoted: msg,
         });
         break;
@@ -985,17 +1179,14 @@ async function handleCommand(sock, msg, text) {
       if (args.toLowerCase() === 'reset') {
         aiConfig.systemPrompt = DEFAULT_SYSTEM_PROMPT;
         saveAiConfig();
-        await safeSend(sock, jid, {
-          text: `✅ System prompt direset ke default.`,
-          quoted: msg,
-        });
+        await safeSend(sock, jid, { text: `System prompt direset.`, quoted: msg });
         break;
       }
 
       aiConfig.systemPrompt = args;
       saveAiConfig();
       await safeSend(sock, jid, {
-        text: `✅ *System prompt diperbarui!*\n\n📝 Preview:\n${args.slice(0, 500)}${args.length > 500 ? '...' : ''}`,
+        text: `System prompt diperbarui.\n\n${args.slice(0, 500)}${args.length > 500 ? '...' : ''}`,
         quoted: msg,
       });
       break;
@@ -1004,7 +1195,7 @@ async function handleCommand(sock, msg, text) {
     case 'newchat': {
       clearHistory(jid);
       await safeSend(sock, jid, {
-        text: `🗑️ *Memory AI direset!*\n\n📌 Percakapan baru dimulai dari nol.\n🤖 AI sudah lupa semua chat sebelumnya.`,
+        text: `Memory AI direset. Percakapan baru.`,
         quoted: msg,
       });
       break;

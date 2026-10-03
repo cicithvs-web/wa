@@ -7,6 +7,7 @@ const http  = require('http');
 const axios = require('axios');
 const { execFile } = require('child_process');
 const { CONFIG, YTDLP_BIN, COOKIES_DIR, COOKIES_MAP, DL_UA, log, stats } = require('./config');
+const { safeSend } = require('./helpers');
 
 //============================================================
 // HELPERS
@@ -233,7 +234,7 @@ async function handleTiktok(sock, jid, url, quotedMsg = null) {
 
   if (images) {
     for (let i = 0; i < images.length; i++) {
-      await sock.sendMessage(jid, {
+      await safeSend(sock, jid, {
         image: { url: images[i] },
         caption: i === 0 ? caption : undefined,
         ...(quotedMsg && i === 0 ? { quoted: quotedMsg } : {}),
@@ -242,7 +243,7 @@ async function handleTiktok(sock, jid, url, quotedMsg = null) {
     }
     if (d.music) {
       try {
-        await sock.sendMessage(jid, {
+        await safeSend(sock, jid, {
           audio: { url: d.music },
           mimetype: 'audio/mp4',
         });
@@ -255,7 +256,7 @@ async function handleTiktok(sock, jid, url, quotedMsg = null) {
 
   const videoUrl = d.play || d.hdplay || d.wmplay;
   if (!videoUrl) throw new Error('Video tidak ditemukan dari TikWM.');
-  await sock.sendMessage(jid, {
+  await safeSend(sock, jid, {
     video: { url: videoUrl },
     caption,
     ...(quotedMsg && { quoted: quotedMsg }),
@@ -288,7 +289,7 @@ async function handleEntries(sock, jid, url, cookieFile, quotedMsg = null) {
           if (fs.existsSync(filePath)) {
             const waFilePath = await ensureWaCompatibleVideo(filePath);
             const buf = fs.readFileSync(waFilePath);
-            await sock.sendMessage(jid, {
+            await safeSend(sock, jid, {
               video: buf,
               caption: !sentAny ? caption : undefined,
               ...(quotedMsg && !sentAny ? { quoted: quotedMsg } : {}),
@@ -304,7 +305,7 @@ async function handleEntries(sock, jid, url, cookieFile, quotedMsg = null) {
           const destPath = path.join(tmpDir, `p${i}.${ext}`);
           await downloadUrlToFile(best.url, destPath);
           const buf = fs.readFileSync(destPath);
-          await sock.sendMessage(jid, {
+          await safeSend(sock, jid, {
             image: buf,
             caption: !sentAny ? caption : undefined,
             ...(quotedMsg && !sentAny ? { quoted: quotedMsg } : {}),
@@ -379,7 +380,7 @@ async function handleYoutube(sock, jid, url, quotedMsg = null) {
     const waFilePath = await ensureWaCompatibleVideo(filePath);
     const caption = `👤 ${info.uploader || info.channel || 'YouTube'}\n\n${(info.title || '').slice(0, 900)}`;
     const buf = fs.readFileSync(waFilePath);
-    await sock.sendMessage(jid, {
+    await safeSend(sock, jid, {
       video: buf,
       caption,
       ...(quotedMsg && { quoted: quotedMsg }),

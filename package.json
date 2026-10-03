@@ -13,6 +13,7 @@
   },
   "dependencies": {
     "@whiskeysockets/baileys": "^6.6.0",
+    "adm-zip": "^0.6.1",
     "axios": "^1.7.0",
     "chalk": "^4.1.2",
     "express": "^4.19.2",

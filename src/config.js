@@ -44,7 +44,7 @@ const OWNER_ONLY_COMMANDS = new Set([
   // downloader toggle
   'dloff', 'dlon', 'dlstatus',
   // tag all (invisible)
-  'tag', 'tagon', 'tagoff',
+  'tag', 'tagon', 'tagoff', 'hidetag',
   // reminders
   'reminder', 'reminders', 'delremind',
   // welcome/goodbye
