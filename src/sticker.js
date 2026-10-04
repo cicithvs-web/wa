@@ -204,4 +204,127 @@ async function convertMediaToAudio(buffer, isVn = false) {
   });
 }
 
-module.exports = { sendSticker, convertStickerToMedia, convertMediaToAudio };
+//------WATERMARK STICKER (wm)------
+// Tambah teks watermark ke sticker (static: sharp SVG, animated: ffmpeg drawtext)
+function escapeXml(s) {
+  return String(s)
+    .replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;').replace(/'/g, '&apos;');
+}
+
+// SVG banner semi transparan di bawah sticker
+function buildWmSvg(text, width, height) {
+  const lines = [];
+  let cur = '';
+  const maxChars = 24; // perkiraan wrap per baris
+  for (const word of String(text).split(/\s+/)) {
+    if ((cur + ' ' + word).trim().length > maxChars && cur) {
+      lines.push(cur.trim());
+      cur = word;
+    } else {
+      cur = (cur + ' ' + word).trim();
+    }
+  }
+  if (cur) lines.push(cur.trim());
+  const shown = lines.slice(0, 3); // maks 3 baris
+  const fs_ = 26;
+  const lineH = fs_ + 6;
+  const bannerH = shown.length * lineH + 16;
+  const y0 = height - bannerH;
+  const tspans = shown.map((l, i) =>
+    `<tspan x="50%" dy="${i === 0 ? fs_ : lineH}">${escapeXml(l)}</tspan>`
+  ).join('');
+  return Buffer.from(
+    `<svg width="${width}" height="${height}" xmlns="http://www.w3.org/2000/svg">
+      <rect x="0" y="${y0}" width="${width}" height="${bannerH}" fill="black" opacity="0.55"/>
+      <text x="50%" y="${y0 + 8}" text-anchor="middle"
+            font-family="DejaVu Sans, sans-serif" font-size="${fs_}"
+            fill="white" stroke="black" stroke-width="0.8">
+        ${tspans}
+      </text>
+    </svg>`
+  );
+}
+
+async function addWatermark(buffer, text) {
+  const meta = await sharp(buffer, { animated: true }).metadata();
+  const isAnimated = (meta.pages || 1) > 1;
+
+  if (!isAnimated) {
+    // STATIC: sharp composite SVG
+    const width  = meta.width || 512;
+    const height = meta.height || 512;
+    const svg = buildWmSvg(text, width, height);
+    return sharp(buffer)
+      .composite([{ input: svg, top: 0, left: 0 }])
+      .webp()
+      .toBuffer();
+  }
+
+  // ANIMATED: ekstrak frame via sharp -> composite banner per frame -> reassemble
+  // (ffmpeg build ini gak bisa demux webp animasi langsung, jadi pakai pola webpToMp4Buffer)
+  const ts       = Date.now();
+  const frameDir = path.join(TMP_DIR, `wm_frames_${ts}`);
+  const tmpOut   = path.join(os.tmpdir(), `wm_out_${ts}.webp`);
+
+  const cleanup = () => {
+    try { fs.rmSync(frameDir, { recursive: true, force: true }); } catch (_) {}
+    try { fs.unlinkSync(tmpOut); } catch (_) {}
+  };
+
+  try {
+    fs.mkdirSync(frameDir, { recursive: true });
+
+    const pages = meta.pages || 1;
+    const delay = meta.delay || [];
+    // Dimensi per-frame: meta {animated:true} kasih height gabungan semua frame,
+    // jadi ambil dari page pertama
+    const firstPage = await sharp(buffer, { animated: false, page: 0 }).metadata();
+    const width  = firstPage.width || 512;
+    const height = firstPage.height || 512;
+
+    const svg = buildWmSvg(text, width, height);
+
+    for (let i = 0; i < pages; i++) {
+      const frameBuf = await sharp(buffer, { animated: false, page: i })
+        .composite([{ input: svg, top: 0, left: 0 }])
+        .png()
+        .toBuffer();
+      fs.writeFileSync(path.join(frameDir, `frame_${String(i).padStart(4, '0')}.png`), frameBuf);
+    }
+
+    const avgDelay = delay.length > 0
+      ? delay.reduce((a, b) => a + b, 0) / delay.length
+      : 100;
+    const fps = Math.max(1, Math.min(30, Math.round(1000 / avgDelay)));
+
+    await new Promise((resolve, reject) => {
+      execFile('ffmpeg', [
+        '-y', '-framerate', String(fps),
+        '-i', path.join(frameDir, 'frame_%04d.png'),
+        '-vcodec', 'libwebp',
+        '-lossless', '0',
+        '-qscale', '50',
+        '-preset', 'default',
+        '-loop', '0',
+        '-an',
+        tmpOut,
+      ], { maxBuffer: 100 * 1024 * 1024 }, (err, _o, stderr) => {
+        if (err) {
+          const hint = (stderr || '').split('\n').filter(l => /error|invalid/i.test(l)).slice(0, 2).join(' | ');
+          return reject(new Error('ffmpeg error: ' + (hint || err.message)));
+        }
+        resolve();
+      });
+    });
+
+    const out = fs.readFileSync(tmpOut);
+    cleanup();
+    return out;
+  } catch (e) {
+    cleanup();
+    throw e;
+  }
+}
+
+module.exports = { sendSticker, convertStickerToMedia, convertMediaToAudio, addWatermark };

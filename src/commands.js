@@ -8,11 +8,13 @@ const { safeSend } = require('./helpers');
 const { extractViewOnce, processViewOnce, getLastViewOnce, getViewOnceById } = require('./viewonce');
 const { tagStates, saveTagStates } = require('./tag');
 const { dlOffStates, saveDlOffStates, isAutoDownloadEnabled } = require('./dl-toggle');
-const { sendSticker, convertStickerToMedia, convertMediaToAudio } = require('./sticker');
+const { sendSticker, convertStickerToMedia, convertMediaToAudio, addWatermark } = require('./sticker');
 const { detectPlatform, runDownloader } = require('./downloader');
 const { captureQuotedContent, addReminder, cancelReminder, listReminders, formatDueAt } = require('./reminders');
 const { autoReplies, saveAutoReplies, photoHash, PHOTO_STORE_DIR } = require('./autoreply');
 const { getPrefix, setPrefix } = require('./prefix');
+const { sendMainMenu, sendCategoryDetail } = require('./menu');
+const { handleImageFilter, parseFilterCommand } = require('./filters');
 const {
   getWelcomeState, setWelcomeEnabled, setWelcomeMsg, setByeMsg,
   DEFAULT_WELCOME, DEFAULT_BYE,
@@ -23,6 +25,21 @@ const {
 } = require('./ai');
 
 //----------COMMAND HANDLER----------
+
+// Preview auto-reply ber-tombol (dipakai pas .set biar langsung keliatan hasilnya)
+async function sendAutoReplyPreview(sock, jid, entry) {
+  const { sendNativeFlow } = require('./menu');
+  const btnTexts = (entry.buttons || []).map(b => `› ${b.text}`).join('\n');
+  const ok = await sendNativeFlow(sock, jid, {
+    text: `${entry.value}\n\n_(preview: tap tombol di bawah buat cek)_`,
+    footer: 'Preview auto-reply',
+    buttons: (entry.buttons || []).map(b => ({ type: 'quick_reply', id: b.id, text: b.text })),
+  });
+  if (!ok) {
+    await safeSend(sock, jid, { text: `${entry.value}\n\nTombol:\n${btnTexts}` });
+  }
+}
+
 async function handleCommand(sock, msg, text) {
   const jid = msg.key?.remoteJid;
   const p = getPrefix();
@@ -52,54 +69,50 @@ async function handleCommand(sock, msg, text) {
     // INFORMASI
     // ============================================================
     case 'help':
-      await safeSend(sock, jid, {
-        text:
-          `_huft..._​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​​` +
+    case 'menu': {
+      // Detail kategori: .help <kategori> / .menu <kategori>
+      if (args) {
+        await sendCategoryDetail(sock, jid, args.split(/\s+/)[0], msg);
+        break;
+      }
 
-`*MEDIA*\n` +
-`› *${p}open*\n` +
-`› *${p}sticker*\n` +
-`› *${p}toimage*\n` +
-`› *${p}tovideo*\n` +
-`› *${p}tomp3* / *${p}toaudio*\n` +
-`› *${p}tovn*\n\n` +
+      // Fallback text kalau pesan interaktif gagal terkirim
+      const helpFallback =
+        `*BOT MENU*\n\n` +
+        `*MEDIA*\n` +
+        `› *${p}open* · *${p}sticker* · *${p}toimage*\n` +
+        `› *${p}tovideo* · *${p}tomp3* / *${p}toaudio* · *${p}tovn*\n` +
+        `› Filter foto (reply): *${p}blur* *${p}grayscale* *${p}flip* *${p}flipv*\n` +
+        `›  *${p}rotate* *${p}crop* *${p}dark* *${p}bright* — bisa digabung\n` +
+        `› Watermark sticker (reply): *${p}wm <pesan>*\n\n` +
+        `*DOWNLOADER*\n` +
+        `› Kirim link — *(Auto)*\n` +
+        `› *${p}dl <link>* · *${p}dlon* / *${p}dloff* · *${p}dlstatus*\n\n` +
+        `*SCHEDULER*\n` +
+        `› *Reply pesan* + *${p}reminder <detik>*\n` +
+        `› *${p}reminders* · *${p}delremind <id>*\n\n` +
+        `*GRUP*\n` +
+        `› *${p}welcome* · *${p}welon* / *${p}weloff*\n` +
+        `› *${p}setwelcome <pesan>* · *${p}setbye <pesan>*\n` +
+        `› *${p}tag* · *${p}tagon* / *${p}tagoff* · *${p}hidetag <pesan>*\n` +
+        `› Placeholder: {name} {group} {count}\n\n` +
+        `*AI CHAT*\n` +
+        `› *${p}ask <pertanyaan>* · *${p}ai*\n` +
+        `› *${p}aion* / *${p}aioff* · *${p}setai key|model|url*\n` +
+        `› *${p}aisystem <prompt>* · *${p}newchat*\n\n` +
+        `*AUTO-REPLY* _(owner)_\n` +
+        `› *${p}set <trigger> | <balasan>*\n` +
+        `› *${p}set <tr> | <pesan> | [tombol] <teks> | [tombol] <teks>* — dengan tombol\n` +
+        `› *${p}listauto* — daftar (tap row = hapus) · *${p}del <trigger>*\n\n` +
+        `*SYSTEM*\n` +
+        `› *${p}status* · *${p}ping* · *${p}uptime* · *${p}setprefix <prefix>*\n\n` +
+        `Detail kategori: *${p}help <kategori>*\n` +
+        `_Kategori: media, downloader, scheduler, grup, ai, system_\n\n` +
+        `_V${CONFIG.VERSION} · Prefix: ${p}_`;
 
-`*DOWNLOADER*\n` +
-`› Kirim link — *(Auto)*\n` +
-`› *${p}dl <link>*\n` +
-`› *${p}dlon* / *${p}dloff*\n` +
-`› *${p}dlstatus*\n\n` +
-
-`*SCHEDULER*\n` +
-`› *Reply pesan* + *${p}reminder <detik>*\n` +
-`› *${p}reminders*\n` +
-`› *${p}delremind <id>*\n\n` +
-
-`*GRUP*\n` +
-`› *${p}welcome* / *${p}welon* / *${p}weloff*\n` +
-`› *${p}setwelcome <pesan>*\n` +
-`› *${p}setbye <pesan>*\n` +
-`› *${p}tag* / *${p}tagon* / *${p}tagoff*\n` +
-`› *${p}hidetag <pesan>*\n` +
-`› Placeholder: {name} {group} {count}\n\n` +
-
-`*AI CHAT*\n` +
-`› *${p}ask <pertanyaan>*\n` +
-`› *${p}ai* / *${p}aion* / *${p}aioff*\n` +
-`› *${p}setai key|model|url*\n` +
-`› *${p}aisystem <prompt>*\n` +
-`› *${p}newchat* — reset memory\n\n` +
-
-`*SYSTEM*\n` +
-`› *${p}status*\n` +
-`› *${p}ping*\n` +
-`› *${p}uptime*\n` +
-`› *${p}setprefix <prefix>*\n\n` +
-
-`_V${CONFIG.VERSION} · Prefix: ${p}_`,
-        quoted: msg,
-      });
+      await sendMainMenu(sock, jid, msg, helpFallback);
       break;
+    }
 
     case 'status': {
       const s = stats;
@@ -708,6 +721,86 @@ async function handleCommand(sock, msg, text) {
     }
 
     // ============================================================
+    // MEDIA — IMAGE FILTERS (reply foto + command)
+    // ============================================================
+    case 'blur':
+    case 'grayscale':
+    case 'flip':
+    case 'flipv':
+    case 'rotate':
+    case 'crop':
+    case 'dark':
+    case 'bright': {
+      // Argumen bisa: ".blur" | ".blur 15" | ".blur grayscale" (kombinasi)
+      // parseFilterCommand sudah memasukkan cmd sebagai filter utama,
+      // dan angka menempel ke filter yang tepat sebelumnya.
+      const { names, args: filterArgs } = parseFilterCommand(args, cmd);
+      await handleImageFilter(sock, msg, names, filterArgs);
+      break;
+    }
+
+    // ============================================================
+    // MEDIA — WATERMARK STICKER (reply sticker + .wm <pesan>)
+    // ============================================================
+    case 'wm': {
+      const wmText = args.trim();
+      const ctxInfo   = msg.message?.extendedTextMessage?.contextInfo;
+      const quotedMsg = ctxInfo?.quotedMessage;
+      const ownSticker = msg.message?.stickerMessage || null;
+      const quotedSticker = quotedMsg?.stickerMessage || null;
+
+      if (!wmText) {
+        await safeSend(sock, jid, {
+          text: `⚠️ Reply ke *sticker* lalu ketik *${p}wm <pesan>*\n\nContoh: ${p}wm buatan aku 😎`,
+          quoted: msg,
+        });
+        break;
+      }
+      if (!ownSticker && !quotedSticker) {
+        await safeSend(sock, jid, {
+          text: `⚠️ Reply ke *sticker* dengan command *${p}wm <pesan>* ya.\n\nContoh: ${p}wm buatan aku 😎`,
+          quoted: msg,
+        });
+        break;
+      }
+
+      try {
+        await safeSend(sock, jid, { react: { text: '⏳', key: msg.key } });
+
+        const targetMsg = ownSticker
+          ? msg
+          : {
+              key: {
+                remoteJid: jid,
+                fromMe: false,
+                id: ctxInfo.stanzaId,
+                participant: ctxInfo?.participant || jid,
+              },
+              message: quotedMsg,
+            };
+
+        const buf = await downloadMediaMessage(targetMsg, 'buffer', {}, {
+          logger, reuploadRequest: sock.updateMediaMessage,
+        });
+        if (!buf || buf.length === 0) throw new Error('Buffer sticker kosong');
+
+        const out = await addWatermark(buf, wmText);
+
+        await sock.sendMessage(jid, { sticker: out, mimetype: 'image/webp' });
+        stats.inc('sticker');
+        await safeSend(sock, jid, { react: { text: '✅', key: msg.key } });
+        log.ok(`✅ Watermark sticker: "${wmText.slice(0, 30)}"`);
+      } catch (e) {
+        log.err(`wm error: ${e.message}`);
+        await safeSend(sock, jid, {
+          text: `❌ Gagal bikin watermark: ${e.message}`,
+          quoted: msg,
+        }).catch(() => {});
+      }
+      break;
+    }
+
+    // ============================================================
     // SCHEDULER / REMINDER
     // ============================================================
     case 'reminder': {
@@ -834,6 +927,35 @@ async function handleCommand(sock, msg, text) {
         const valLabel  = e.type === 'photo' ? `[foto] ${e.caption || ''}` : e.value;
         return `${i + 1}. *${trigLabel}* -> ${valLabel}`;
       }).join('\n');
+
+      // List interaktif: tap row = hapus auto-reply itu (maks 10 row biar wajar)
+      const rows = keys.slice(0, 10).map((k, i) => {
+        const trigLabel = k.startsWith('__photo__') ? `[foto:${k.slice(9, 17)}]` : k;
+        return {
+          id: `ardel:${k}`,
+          title: `🗑️ ${i + 1}. ${trigLabel}`,
+          description: autoReplies[k].type === 'photo' ? '[balasan foto]' : autoReplies[k].value.slice(0, 40),
+        };
+      });
+
+      if (rows.length > 0) {
+        const { sendNativeFlow } = require('./menu');
+        const ok = await sendNativeFlow(sock, jid, {
+          text: `📋 *Daftar Auto-Reply (${keys.length}):*\n\n${list}`,
+          footer: `Tap row untuk hapus${keys.length > 10 ? ` (10 pertama saja)` : ''}`,
+          quoted: msg,
+          buttons: [
+            {
+              type: 'list',
+              text: '🗑️ Hapus Auto-Reply',
+              title: 'Hapus',
+              rows,
+            },
+          ],
+        });
+        if (ok) break;
+      }
+
       await safeSend(sock, jid, { text: `📋 *Daftar Auto-Reply (${keys.length}):*\n\n${list}\n\n_Hapus: ${p}del <trigger>_` });
       break;
     }
@@ -930,9 +1052,10 @@ async function handleCommand(sock, msg, text) {
               text:
                 `⚠️ *Format ${p}set:*\n\n` +
                 `*1. Trigger teks → balas teks:*\n   ${p}set halo | hai juga!\n\n` +
-                `*2. Trigger teks → balas foto:*\n   [kirim foto] caption: ${p}set halo\n\n` +
-                `*3. Trigger foto → balas teks:*\n   [reply foto] ${p}set balasan kamu\n\n` +
-                `*4. Trigger foto → balas foto:*\n   [reply foto] kirim ${p}set [dengan foto]`,
+                `*2. Balasan dengan tombol (maks 3):*\n   ${p}set menu | Pilih aksi | [tombol] Status | [tombol] Ping\n\n` +
+                `*3. Trigger teks → balas foto:*\n   [kirim foto] caption: ${p}set halo\n\n` +
+                `*4. Trigger foto → balas teks:*\n   [reply foto] ${p}set balasan kamu\n\n` +
+                `*5. Trigger foto → balas foto:*\n   [reply foto] kirim ${p}set [dengan foto]`,
             });
             break;
           }
@@ -950,16 +1073,41 @@ async function handleCommand(sock, msg, text) {
         break;
       }
 
+      // ── Parse tombol opsional dari teks balasan ──
+      // Format: "pesan | [tombol] teks | [tombol] teks" (maks 3 tombol)
+      // Contoh: .set menu | Ini menu bot | [tombol] Status | [tombol] Ping
+      if (replyEntry.type === 'text') {
+        const rawParts = replyEntry.value.split('|').map(s => s.trim()).filter(Boolean);
+        const mainText = rawParts[0];
+        const btns = [];
+        for (const part of rawParts.slice(1)) {
+          const m = part.match(/^\[tombol\]\s*(.+)$/i);
+          if (m && btns.length < 3) {
+            btns.push({ id: `arbtn:${trigger}:${btns.length}`, text: m[1].trim() });
+          }
+        }
+        if (btns.length > 0) {
+          replyEntry.value = mainText;
+          replyEntry.buttons = btns;
+        }
+      }
+
       autoReplies[trigger] = replyEntry;
       saveAutoReplies(autoReplies);
 
       const trigLabel = trigger.startsWith('__photo__') ? '[foto]' : `*${trigger}*`;
       const valLabel  = replyEntry.type === 'photo' ? '📸 foto' : replyEntry.value;
-      log.ok(`Auto-reply set: "${trigger}" -> ${valLabel}`);
+      const btnLabel  = replyEntry.buttons ? ` + ${replyEntry.buttons.length} tombol` : '';
+      log.ok(`Auto-reply set: "${trigger}" -> ${valLabel}${btnLabel}`);
       await safeSend(sock, jid, {
-        text: `Auto-reply disimpan.\nTrigger: ${trigLabel}\nBalasan: ${valLabel}`,
+        text: `Auto-reply disimpan.\nTrigger: ${trigLabel}\nBalasan: ${valLabel}${btnLabel}`,
         quoted: msg,
       });
+
+      // Preview kalau ada tombol — biar langsung keliatan hasilnya
+      if (replyEntry.buttons && replyEntry.buttons.length > 0) {
+        await sendAutoReplyPreview(sock, jid, replyEntry);
+      }
       break;
     }
 
