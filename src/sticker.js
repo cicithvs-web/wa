@@ -251,13 +251,18 @@ async function addWatermark(buffer, text) {
   const isAnimated = (meta.pages || 1) > 1;
 
   if (!isAnimated) {
-    // STATIC: sharp composite SVG
+    // STATIC: render SVG -> PNG overlay, lalu composite ke gambar.
+    // (Composite SVG langsung ke WebP tidak andal — banner bisa hilang.)
     const width  = meta.width || 512;
     const height = meta.height || 512;
     const svg = buildWmSvg(text, width, height);
-    return sharp(buffer)
-      .composite([{ input: svg, top: 0, left: 0 }])
-      .webp()
+    // Render SVG pada ukuran asli (tanpa density scaling) -> overlay PNG RGBA
+    const overlay = await sharp(svg).resize(width, height, { fit: 'fill' }).png().toBuffer();
+    // Normalkan base ke PNG RGBA dulu agar dimensi & channel konsisten
+    const base = await sharp(buffer).ensureAlpha().resize(width, height, { fit: 'fill' }).png().toBuffer();
+    return sharp(base)
+      .composite([{ input: overlay, top: 0, left: 0 }])
+      .webp({ quality: 90 })
       .toBuffer();
   }
 
@@ -284,10 +289,17 @@ async function addWatermark(buffer, text) {
     const height = firstPage.height || 512;
 
     const svg = buildWmSvg(text, width, height);
+    // Render overlay sekali (PNG RGBA ukuran frame), reuse untuk semua frame
+    const overlay = await sharp(svg).resize(width, height, { fit: 'fill' }).png().toBuffer();
 
     for (let i = 0; i < pages; i++) {
-      const frameBuf = await sharp(buffer, { animated: false, page: i })
-        .composite([{ input: svg, top: 0, left: 0 }])
+      const frameBase = await sharp(buffer, { animated: false, page: i })
+        .ensureAlpha()
+        .resize(width, height, { fit: 'fill' })
+        .png()
+        .toBuffer();
+      const frameBuf = await sharp(frameBase)
+        .composite([{ input: overlay, top: 0, left: 0 }])
         .png()
         .toBuffer();
       fs.writeFileSync(path.join(frameDir, `frame_${String(i).padStart(4, '0')}.png`), frameBuf);

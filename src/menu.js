@@ -71,6 +71,11 @@ async function sendNativeFlow(sock, jid, { text, footer, buttons, quoted = null 
     }
 
     const msgContent = proto.Message.InteractiveMessage.create({
+      header: proto.Message.InteractiveMessage.Header.create({
+        title: '',
+        subtitle: '',
+        hasMediaAttachment: false,
+      }),
       body: proto.Message.InteractiveMessage.Body.create({ text }),
       footer: proto.Message.InteractiveMessage.Footer.create({ text: footer || CONFIG.BOT_NAME || 'WhatsApp Bot' }),
       nativeFlowMessage: proto.Message.InteractiveMessage.NativeFlowMessage.create({
@@ -78,17 +83,15 @@ async function sendNativeFlow(sock, jid, { text, footer, buttons, quoted = null 
       }),
     });
 
+    // Interactive message TIDAK dibungkus viewOnceMessage (itu untuk media
+    // sekali-lihat). Kirim interactiveMessage langsung + messageContextInfo.
     const msg = generateWAMessageFromContent(
       jid,
       proto.Message.fromObject({
-        viewOnceMessage: {
-          message: {
-            messageContextInfo: {
-              deviceListMetadata: {},
-              deviceListMetadataVersion: 2,
-            },
-            interactiveMessage: msgContent,
-          },
+        interactiveMessage: msgContent,
+        messageContextInfo: {
+          deviceListMetadata: {},
+          deviceListMetadataVersion: 2,
         },
       }),
       { userJid: jid, quoted: quoted || undefined },
