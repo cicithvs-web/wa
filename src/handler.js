@@ -17,109 +17,6 @@ const { tagStates } = require('./tag');
 const { handleCommand } = require('./commands');
 const { getPrefix } = require('./prefix');
 const { handleAiMessage } = require('./ai');
-const { sendCategoryDetail, sendMainMenu } = require('./menu');
-
-// ============================================================
-// INTERACTIVE RESPONSE (tombol menu / list)
-// ============================================================
-// Response tap tombol datang sebagai pesan biasa di messages.upsert.
-// Ambil id-nya, lalu map ke aksi/command yang sesuai.
-function extractInteractiveId(msg) {
-  const m = msg.message || {};
-
-  // Native flow (tombol interaktif baru)
-  const nativeFlow = m.interactiveResponseMessage?.nativeFlowResponseMessage;
-  if (nativeFlow?.params_json) {
-    try {
-      const parsed = JSON.parse(nativeFlow.params_json);
-      if (parsed?.id) return { id: parsed.id, kind: 'native' };
-    } catch (_) {}
-  }
-
-  // List dropdown
-  const listSel = m.listResponseMessage?.singleSelectReply?.selectedRowId;
-  if (listSel) return { id: listSel, kind: 'list' };
-
-  // Quick reply (protokol lama)
-  const btnSel = m.buttonsResponseMessage?.selectedButtonId;
-  if (btnSel) return { id: btnSel, kind: 'button' };
-
-  return null;
-}
-
-// Map id tombol/list → aksi. Return true kalau handled.
-async function handleInteractiveResponse(sock, msg, inter) {
-  const jid = msg.key?.remoteJid;
-  const p   = getPrefix();
-  const id  = inter.id || '';
-
-  try {
-    // ── Detail kategori: menu:<kategori> ──
-    if (id.startsWith('menu:') && !['menu:status', 'menu:ping', 'menu:reminders'].includes(id)) {
-      const cat = id.slice(5);
-      await sendCategoryDetail(sock, jid, cat, msg);
-      return true;
-    }
-
-    // ── Quick reply utama ──
-    if (id === 'menu:status') {
-      await handleCommand(sock, msg, `${p}status`);
-      return true;
-    }
-    if (id === 'menu:ping') {
-      await handleCommand(sock, msg, `${p}ping`);
-      return true;
-    }
-    if (id === 'menu:reminders') {
-      await handleCommand(sock, msg, `${p}reminders`);
-      return true;
-    }
-    if (id === 'menu:main' || id === 'menu') {
-      await sendMainMenu(sock, jid, msg);
-      return true;
-    }
-
-    // ── Tombol auto-reply: arbtn:<trigger>:<idx> ──
-    // Bot kirim isi tombol sebagai pesan (template jawaban cepat)
-    if (id.startsWith('arbtn:')) {
-      // Format: arbtn:<trigger>:<idx> — trigger bisa mengandung ':',
-      // jadi ambil idx dari segmen TERAKHIR dan trigger dari bagian tengah.
-      const rest  = id.slice(6);                    // "<trigger>:<idx>"
-      const sepAt = rest.lastIndexOf(':');
-      const trigger = sepAt === -1 ? rest : rest.slice(0, sepAt);
-      const idx   = sepAt === -1 ? NaN : parseInt(rest.slice(sepAt + 1), 10);
-      const entry = autoReplies[trigger];
-      const btn   = entry?.buttons?.[idx];
-      if (btn?.text) {
-        await safeSend(sock, jid, { text: btn.text, quoted: msg });
-      }
-      return true;
-    }
-
-    // ── Hapus auto-reply dari list: ardel:<trigger> ──
-    if (id.startsWith('ardel:')) {
-      const trigger = id.slice(6);
-      const entry = autoReplies[trigger];
-      if (!entry) {
-        await safeSend(sock, jid, { text: `⚠️ Auto-reply *${trigger}* tidak ditemukan (mungkin sudah dihapus).` });
-        return true;
-      }
-      if (entry.type === 'photo') {
-        try { fs.unlinkSync(path.join(PHOTO_STORE_DIR, entry.value)); } catch (_) {}
-      }
-      delete autoReplies[trigger];
-      saveAutoReplies(autoReplies);
-      await safeSend(sock, jid, { text: `🗑️ Auto-reply *${trigger}* dihapus.` });
-      return true;
-    }
-
-    // Unknown id — biarkan diproses normal (bukan respons tombol kita)
-    return false;
-  } catch (err) {
-    log.err(`handleInteractiveResponse error: ${err.message}`);
-    return true; // tetap anggap handled biar gak dobel proses
-  }
-}
 
 // ============================================================
 // MESSAGES.UPSERT
@@ -148,16 +45,6 @@ async function handleUpsert(sock, { messages, type }) {
 
       const prefix = getPrefix();
       log.dim(`MSG jid=${jid} fromMe=${fromMe} keys=${msgKeys}`);
-
-      // ──────────────────────────────────────────────────────
-      // 🔘 INTERACTIVE RESPONSE (tap tombol menu / list)
-      // ──────────────────────────────────────────────────────
-      const inter = extractInteractiveId(msg);
-      if (inter) {
-        log.dim(`🔘 Interactive response: ${inter.id} (${inter.kind})`);
-        const handled = await handleInteractiveResponse(sock, msg, inter);
-        if (handled) continue;
-      }
 
       // ──────────────────────────────────────────────────────
       // 🔔 BOT AUTO TAG ALL MEMBERS (INVISIBLE)

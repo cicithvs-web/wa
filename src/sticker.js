@@ -205,138 +205,88 @@ async function convertMediaToAudio(buffer, isVn = false) {
 }
 
 //------WATERMARK STICKER (wm)------
-// Tambah teks watermark ke sticker (static: sharp SVG, animated: ffmpeg drawtext)
-function escapeXml(s) {
-  return String(s)
-    .replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
-    .replace(/"/g, '&quot;').replace(/'/g, '&apos;');
+// Watermark = metadata EXIF sticker (pack name + author), tampil saat sticker
+// di-tap/dilihat detailnya — BUKAN teks yang digambar di atas gambar.
+// text boleh "pack" atau "pack|author".
+//
+// Implementasi manual: bangun TIFF/EXIF chunk berisi JSON metadata WhatsApp,
+// lalu sisipkan ke WebP RIFF. Tanpa native dependency tambahan.
+
+function buildExifChunk(pack, author) {
+  const packId = require('crypto').randomBytes(32).toString('hex');
+  const json = JSON.stringify({
+    'sticker-pack-id': packId,
+    'sticker-pack-name': pack,
+    'sticker-pack-publisher': author,
+    'emojis': [],
+  });
+  const jsonBuf = Buffer.from(json, 'utf8');
+
+  // TIFF header: little-endian 'II' + 42 + offset IFD(8)
+  // IFD: 1 entry -> tag 0x0141? Tidak — WhatsApp pakai tag 0x02BC? Kita tiru
+  // layout dari wa-sticker-formatter: tag 0x0141 adalah 'AW' custom... sebenarnya
+  // mereka pakai tag 0x0157 (ASCII) berisi JSON. Kita replika persis:
+  // header(8) + ifdCount(2)=1 + entry(12) + nextIFD(4) + json
+  const tiffHeader = Buffer.from([0x49, 0x49, 0x2a, 0x00, 0x08, 0x00, 0x00, 0x00]);
+  const ifdCount = Buffer.from([0x01, 0x00]);
+  // entry: tag(2)=0x0157 type(2)=7(undefined/ASCII) count(4)=jsonLen value(4)=offset
+  const jsonOffset = 8 + 2 + 12 + 4; // tepat setelah nextIFD pointer
+  const entry = Buffer.alloc(12);
+  entry.writeUInt16LE(0x0157, 0);      // tag
+  entry.writeUInt16LE(7, 2);           // type = UNDEFINED
+  entry.writeUInt32LE(jsonBuf.length, 4);
+  entry.writeUInt32LE(jsonOffset, 8);  // offset data
+  const nextIfd = Buffer.from([0x00, 0x00, 0x00, 0x00]);
+
+  const exifData = Buffer.concat([tiffHeader, ifdCount, entry, nextIfd, jsonBuf]);
+
+  // WebP EXIF chunk: FourCC 'EXIF' + size(LE, tanpa 8 byte header) + data
+  const sizeBuf = Buffer.alloc(4);
+  sizeBuf.writeUInt32LE(exifData.length, 0);
+  const chunk = Buffer.concat([Buffer.from('EXIF', 'latin1'), sizeBuf, exifData]);
+  // chunk harus even-length; pad dengan 0 kalau ganjil
+  return exifData.length % 2 === 0 ? chunk : Buffer.concat([chunk, Buffer.from([0])]);
 }
 
-// SVG banner semi transparan di bawah sticker
-function buildWmSvg(text, width, height) {
-  const lines = [];
-  let cur = '';
-  const maxChars = 24; // perkiraan wrap per baris
-  for (const word of String(text).split(/\s+/)) {
-    if ((cur + ' ' + word).trim().length > maxChars && cur) {
-      lines.push(cur.trim());
-      cur = word;
-    } else {
-      cur = (cur + ' ' + word).trim();
-    }
+// Sisipkan EXIF chunk ke WebP RIFF (setelah VP8/VP8L/VP8X chunk terakhir)
+function insertExifToWebp(webpBuf, exifChunk) {
+  // WebP = RIFF(12) + chunks. Sisipkan EXIF sebelum akhir file.
+  // Update RIFF size di offset 4.
+  const riffSize = webpBuf.length - 8;
+  const newRiffSize = riffSize + exifChunk.length;
+  const out = Buffer.concat([webpBuf, exifChunk]);
+  out.writeUInt32LE(newRiffSize, 4);
+  // Pastikan VP8X feature flag EXIF diset kalau ada VP8X chunk (bit 3 = 0x08)
+  const vp8xIdx = webpBuf.indexOf(Buffer.from('VP8X', 'latin1'));
+  if (vp8xIdx !== -1) {
+    const flagsOffset = vp8xIdx + 8; // setelah 'VP8X'+size(4)
+    out[flagsOffset] = out[flagsOffset] | 0x08;
   }
-  if (cur) lines.push(cur.trim());
-  const shown = lines.slice(0, 3); // maks 3 baris
-  const fs_ = 26;
-  const lineH = fs_ + 6;
-  const bannerH = shown.length * lineH + 16;
-  const y0 = height - bannerH;
-  const tspans = shown.map((l, i) =>
-    `<tspan x="50%" dy="${i === 0 ? fs_ : lineH}">${escapeXml(l)}</tspan>`
-  ).join('');
-  return Buffer.from(
-    `<svg width="${width}" height="${height}" xmlns="http://www.w3.org/2000/svg">
-      <rect x="0" y="${y0}" width="${width}" height="${bannerH}" fill="black" opacity="0.55"/>
-      <text x="50%" y="${y0 + 8}" text-anchor="middle"
-            font-family="DejaVu Sans, sans-serif" font-size="${fs_}"
-            fill="white" stroke="black" stroke-width="0.8">
-        ${tspans}
-      </text>
-    </svg>`
-  );
+  return out;
 }
 
 async function addWatermark(buffer, text) {
-  const meta = await sharp(buffer, { animated: true }).metadata();
-  const isAnimated = (meta.pages || 1) > 1;
-
-  if (!isAnimated) {
-    // STATIC: render SVG -> PNG overlay, lalu composite ke gambar.
-    // (Composite SVG langsung ke WebP tidak andal — banner bisa hilang.)
-    const width  = meta.width || 512;
-    const height = meta.height || 512;
-    const svg = buildWmSvg(text, width, height);
-    // Render SVG pada ukuran asli (tanpa density scaling) -> overlay PNG RGBA
-    const overlay = await sharp(svg).resize(width, height, { fit: 'fill' }).png().toBuffer();
-    // Normalkan base ke PNG RGBA dulu agar dimensi & channel konsisten
-    const base = await sharp(buffer).ensureAlpha().resize(width, height, { fit: 'fill' }).png().toBuffer();
-    return sharp(base)
-      .composite([{ input: overlay, top: 0, left: 0 }])
-      .webp({ quality: 90 })
-      .toBuffer();
+  let pack = 'Sticker';
+  let author = String(text || '').trim();
+  const sep = String(text || '').indexOf('|');
+  if (sep !== -1) {
+    pack = String(text).slice(0, sep).trim() || 'Sticker';
+    author = String(text).slice(sep + 1).trim() || author;
   }
 
-  // ANIMATED: ekstrak frame via sharp -> composite banner per frame -> reassemble
-  // (ffmpeg build ini gak bisa demux webp animasi langsung, jadi pakai pola webpToMp4Buffer)
-  const ts       = Date.now();
-  const frameDir = path.join(TMP_DIR, `wm_frames_${ts}`);
-  const tmpOut   = path.join(os.tmpdir(), `wm_out_${ts}.webp`);
-
-  const cleanup = () => {
-    try { fs.rmSync(frameDir, { recursive: true, force: true }); } catch (_) {}
-    try { fs.unlinkSync(tmpOut); } catch (_) {}
-  };
-
-  try {
-    fs.mkdirSync(frameDir, { recursive: true });
-
-    const pages = meta.pages || 1;
-    const delay = meta.delay || [];
-    // Dimensi per-frame: meta {animated:true} kasih height gabungan semua frame,
-    // jadi ambil dari page pertama
-    const firstPage = await sharp(buffer, { animated: false, page: 0 }).metadata();
-    const width  = firstPage.width || 512;
-    const height = firstPage.height || 512;
-
-    const svg = buildWmSvg(text, width, height);
-    // Render overlay sekali (PNG RGBA ukuran frame), reuse untuk semua frame
-    const overlay = await sharp(svg).resize(width, height, { fit: 'fill' }).png().toBuffer();
-
-    for (let i = 0; i < pages; i++) {
-      const frameBase = await sharp(buffer, { animated: false, page: i })
-        .ensureAlpha()
-        .resize(width, height, { fit: 'fill' })
-        .png()
-        .toBuffer();
-      const frameBuf = await sharp(frameBase)
-        .composite([{ input: overlay, top: 0, left: 0 }])
-        .png()
-        .toBuffer();
-      fs.writeFileSync(path.join(frameDir, `frame_${String(i).padStart(4, '0')}.png`), frameBuf);
-    }
-
-    const avgDelay = delay.length > 0
-      ? delay.reduce((a, b) => a + b, 0) / delay.length
-      : 100;
-    const fps = Math.max(1, Math.min(30, Math.round(1000 / avgDelay)));
-
-    await new Promise((resolve, reject) => {
-      execFile('ffmpeg', [
-        '-y', '-framerate', String(fps),
-        '-i', path.join(frameDir, 'frame_%04d.png'),
-        '-vcodec', 'libwebp',
-        '-lossless', '0',
-        '-qscale', '50',
-        '-preset', 'default',
-        '-loop', '0',
-        '-an',
-        tmpOut,
-      ], { maxBuffer: 100 * 1024 * 1024 }, (err, _o, stderr) => {
-        if (err) {
-          const hint = (stderr || '').split('\n').filter(l => /error|invalid/i.test(l)).slice(0, 2).join(' | ');
-          return reject(new Error('ffmpeg error: ' + (hint || err.message)));
-        }
-        resolve();
-      });
-    });
-
-    const out = fs.readFileSync(tmpOut);
-    cleanup();
-    return out;
-  } catch (e) {
-    cleanup();
-    throw e;
+  // Hapus EXIF lama kalau ada (hindari duplikat chunk)
+  let base = buffer;
+  const exifIdx = base.indexOf(Buffer.from('EXIF', 'latin1'));
+  if (exifIdx !== -1) {
+    const exifSize = base.readUInt32LE(exifIdx + 4) + 8;
+    const padded = exifSize % 2 === 0 ? exifSize : exifSize + 1;
+    base = Buffer.concat([base.slice(0, exifIdx), base.slice(exifIdx + padded)]);
+    // perbaiki RIFF size
+    base.writeUInt32LE(base.length - 8, 4);
   }
+
+  const exifChunk = buildExifChunk(pack, author);
+  return insertExifToWebp(base, exifChunk);
 }
 
 module.exports = { sendSticker, convertStickerToMedia, convertMediaToAudio, addWatermark };

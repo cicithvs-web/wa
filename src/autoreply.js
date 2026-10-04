@@ -5,7 +5,6 @@ const path   = require('path');
 const crypto = require('crypto');
 const { log } = require('./config');
 const { safeSend } = require('./helpers');
-const { sendNativeFlow } = require('./menu');
 
 const AUTO_REPLY_FILE = './auto_reply.json';
 const PHOTO_STORE_DIR = './ar_photos';
@@ -31,27 +30,12 @@ function photoHash(buffer) {
   return '__photo__' + crypto.createHash('sha256').update(buffer).digest('hex').slice(0, 16);
 }
 
-// Kirim balasan auto-reply (teks, foto, atau dengan tombol)
-// entry.buttons: [{ id, text }] (opsional, maks 3 quick reply)
+// Kirim balasan auto-reply (teks atau foto)
 async function sendAutoReply(sock, jid, entry, quotedMsg) {
   try {
-    const buttons = Array.isArray(entry.buttons) ? entry.buttons.slice(0, 3) : [];
-    const quoted  = quotedMsg || undefined;
+    const quoted = quotedMsg || undefined;
 
     if (entry.type === 'text') {
-      if (buttons.length > 0) {
-        const ok = await sendNativeFlow(sock, jid, {
-          text: entry.value,
-          footer: entry.footer || '',
-          quoted: quotedMsg,
-          buttons: buttons.map(b => ({ type: 'quick_reply', id: b.id, text: b.text })),
-        });
-        if (ok) return;
-        // Fallback: kirim teks + daftar tombol dalam teks
-        const btnList = buttons.map(b => `› ${b.text}`).join('\n');
-        await safeSend(sock, jid, { text: `${entry.value}\n\n${btnList}`, quoted });
-        return;
-      }
       await safeSend(sock, jid, { text: entry.value, quoted });
 
     } else if (entry.type === 'photo') {
