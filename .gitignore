@@ -4,3 +4,8 @@ auth_info/
 !package.json
 !download-ytdlp.js
 .env
+
+# Sisa backup editor
+*.save
+*.bak
+*.orig
