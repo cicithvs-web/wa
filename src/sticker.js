@@ -3,8 +3,10 @@
 const fs   = require('fs');
 const path = require('path');
 const os   = require('os');
+const crypto = require('crypto');
 const { execFile } = require('child_process');
 const sharp = require('sharp');
+const webpmux = require('node-webpmux');
 const { downloadMediaMessage } = require('@whiskeysockets/baileys');
 const { log, stats, logger } = require('./config');
 const { safeSend } = require('./helpers');
@@ -115,15 +117,22 @@ async function webpToMp4Buffer(buffer) {
 }
 
 //----------SEND STICKER----------
-async function sendSticker(sock, jid, buffer, quoted = null, isVideo = false) {
+async function sendSticker(sock, jid, buffer, quoted = null, isVideo = false, wm = null) {
   try {
     log.info(`Converting to WebP sticker (isVideo=${isVideo})...`);
-    const webp = await toWebpBuffer(buffer, isVideo);
-    const msg = { sticker: webp, mimetype: 'image/webp' };
+    let stickerBuf = await toWebpBuffer(buffer, isVideo);
+    if (wm) {
+      try {
+        stickerBuf = await addWatermark(stickerBuf, wm);
+      } catch (err) {
+        log.warn(`Failed to add watermark to sticker: ${err.message}`);
+      }
+    }
+    const msg = { sticker: stickerBuf, mimetype: 'image/webp' };
     if (quoted) msg.quoted = quoted;
     await sock.sendMessage(jid, msg);
     stats.inc('sticker');
-    log.ok(`✅ Sticker sent (${(webp.length / 1024).toFixed(1)} KB)`);
+    log.ok(`✅ Sticker sent (${(stickerBuf.length / 1024).toFixed(1)} KB)`);
     return true;
   } catch (e) {
     log.warn(`Sticker failed: ${e.message}`);
@@ -206,63 +215,32 @@ async function convertMediaToAudio(buffer, isVn = false) {
 
 //------WATERMARK STICKER (wm)------
 // Watermark = metadata EXIF sticker (pack name + author), tampil saat sticker
-// di-tap/dilihat detailnya — BUKAN teks yang digambar di atas gambar.
-// text boleh "pack" atau "pack|author".
-//
-// Implementasi manual: bangun TIFF/EXIF chunk berisi JSON metadata WhatsApp,
-// lalu sisipkan ke WebP RIFF. Tanpa native dependency tambahan.
+// di-tap/dilihat detailnya di WhatsApp.
+// format text: "author" atau "pack|author" / "pack | author"
 
-function buildExifChunk(pack, author) {
-  const packId = require('crypto').randomBytes(32).toString('hex');
-  const json = JSON.stringify({
-    'sticker-pack-id': packId,
+function buildExifBuffer(pack, author, categories = ['']) {
+  const json = {
+    'sticker-pack-id': crypto.randomBytes(32).toString('hex'),
     'sticker-pack-name': pack,
     'sticker-pack-publisher': author,
-    'emojis': [],
-  });
-  const jsonBuf = Buffer.from(json, 'utf8');
+    emojis: categories,
+  };
+  const jsonBuf = Buffer.from(JSON.stringify(json), 'utf8');
 
-  // TIFF header: little-endian 'II' + 42 + offset IFD(8)
-  // IFD: 1 entry -> tag 0x0141? Tidak — WhatsApp pakai tag 0x02BC? Kita tiru
-  // layout dari wa-sticker-formatter: tag 0x0141 adalah 'AW' custom... sebenarnya
-  // mereka pakai tag 0x0157 (ASCII) berisi JSON. Kita replika persis:
-  // header(8) + ifdCount(2)=1 + entry(12) + nextIFD(4) + json
-  const tiffHeader = Buffer.from([0x49, 0x49, 0x2a, 0x00, 0x08, 0x00, 0x00, 0x00]);
-  const ifdCount = Buffer.from([0x01, 0x00]);
-  // entry: tag(2)=0x0157 type(2)=7(undefined/ASCII) count(4)=jsonLen value(4)=offset
-  const jsonOffset = 8 + 2 + 12 + 4; // tepat setelah nextIFD pointer
-  const entry = Buffer.alloc(12);
-  entry.writeUInt16LE(0x0157, 0);      // tag
-  entry.writeUInt16LE(7, 2);           // type = UNDEFINED
-  entry.writeUInt32LE(jsonBuf.length, 4);
-  entry.writeUInt32LE(jsonOffset, 8);  // offset data
-  const nextIfd = Buffer.from([0x00, 0x00, 0x00, 0x00]);
-
-  const exifData = Buffer.concat([tiffHeader, ifdCount, entry, nextIfd, jsonBuf]);
-
-  // WebP EXIF chunk: FourCC 'EXIF' + size(LE, tanpa 8 byte header) + data
-  const sizeBuf = Buffer.alloc(4);
-  sizeBuf.writeUInt32LE(exifData.length, 0);
-  const chunk = Buffer.concat([Buffer.from('EXIF', 'latin1'), sizeBuf, exifData]);
-  // chunk harus even-length; pad dengan 0 kalau ganjil
-  return exifData.length % 2 === 0 ? chunk : Buffer.concat([chunk, Buffer.from([0])]);
-}
-
-// Sisipkan EXIF chunk ke WebP RIFF (setelah VP8/VP8L/VP8X chunk terakhir)
-function insertExifToWebp(webpBuf, exifChunk) {
-  // WebP = RIFF(12) + chunks. Sisipkan EXIF sebelum akhir file.
-  // Update RIFF size di offset 4.
-  const riffSize = webpBuf.length - 8;
-  const newRiffSize = riffSize + exifChunk.length;
-  const out = Buffer.concat([webpBuf, exifChunk]);
-  out.writeUInt32LE(newRiffSize, 4);
-  // Pastikan VP8X feature flag EXIF diset kalau ada VP8X chunk (bit 3 = 0x08)
-  const vp8xIdx = webpBuf.indexOf(Buffer.from('VP8X', 'latin1'));
-  if (vp8xIdx !== -1) {
-    const flagsOffset = vp8xIdx + 8; // setelah 'VP8X'+size(4)
-    out[flagsOffset] = out[flagsOffset] | 0x08;
-  }
-  return out;
+  // Little-endian TIFF header (8 bytes) + 1 IFD entry count (2 bytes) + IFD entry (12 bytes)
+  // Tag 0x5741 ('AW' di little-endian: 0x41, 0x57) + Type 7 (UNDEFINED: 0x07, 0x00)
+  // + length (4 bytes) + data offset (4 bytes: 22 / 0x16)
+  const exifAttr = Buffer.from([
+    0x49, 0x49, 0x2a, 0x00, 0x08, 0x00, 0x00, 0x00,
+    0x01, 0x00,
+    0x41, 0x57,
+    0x07, 0x00,
+    0x00, 0x00, 0x00, 0x00,
+    0x16, 0x00, 0x00, 0x00,
+  ]);
+  const exif = Buffer.concat([exifAttr, jsonBuf]);
+  exif.writeUIntLE(jsonBuf.length, 14, 4);
+  return exif;
 }
 
 async function addWatermark(buffer, text) {
@@ -274,19 +252,22 @@ async function addWatermark(buffer, text) {
     author = String(text).slice(sep + 1).trim() || author;
   }
 
-  // Hapus EXIF lama kalau ada (hindari duplikat chunk)
-  let base = buffer;
-  const exifIdx = base.indexOf(Buffer.from('EXIF', 'latin1'));
-  if (exifIdx !== -1) {
-    const exifSize = base.readUInt32LE(exifIdx + 4) + 8;
-    const padded = exifSize % 2 === 0 ? exifSize : exifSize + 1;
-    base = Buffer.concat([base.slice(0, exifIdx), base.slice(exifIdx + padded)]);
-    // perbaiki RIFF size
-    base.writeUInt32LE(base.length - 8, 4);
+  const img = new webpmux.Image();
+  try {
+    await img.load(buffer);
+  } catch (err) {
+    const webpBuf = await sharp(buffer, { animated: true }).webp().toBuffer();
+    await img.load(webpBuf);
   }
-
-  const exifChunk = buildExifChunk(pack, author);
-  return insertExifToWebp(base, exifChunk);
+  img.exif = buildExifBuffer(pack, author);
+  return await img.save(null);
 }
 
-module.exports = { sendSticker, convertStickerToMedia, convertMediaToAudio, addWatermark };
+module.exports = {
+  sendSticker,
+  convertStickerToMedia,
+  convertMediaToAudio,
+  addWatermark,
+  toWebpBuffer,
+  buildExifBuffer,
+};

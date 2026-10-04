@@ -8,7 +8,7 @@ const { safeSend } = require('./helpers');
 const { extractViewOnce, processViewOnce, getLastViewOnce, getViewOnceById } = require('./viewonce');
 const { tagStates, saveTagStates } = require('./tag');
 const { dlOffStates, saveDlOffStates, isAutoDownloadEnabled } = require('./dl-toggle');
-const { sendSticker, convertStickerToMedia, convertMediaToAudio, addWatermark } = require('./sticker');
+const { sendSticker, convertStickerToMedia, convertMediaToAudio, addWatermark, toWebpBuffer } = require('./sticker');
 const { detectPlatform, runDownloader } = require('./downloader');
 const { captureQuotedContent, addReminder, cancelReminder, listReminders, formatDueAt } = require('./reminders');
 const { autoReplies, saveAutoReplies, photoHash, PHOTO_STORE_DIR } = require('./autoreply');
@@ -531,7 +531,7 @@ async function handleCommand(sock, msg, text) {
           throw new Error('Buffer kosong');
         }
 
-        await sendSticker(sock, jid, buffer, msg, isVideo);
+        await sendSticker(sock, jid, buffer, msg, isVideo, args.trim());
         log.ok(`✅ Sticker created from ${isImage ? 'image' : 'video'}`);
 
       } catch (e) {
@@ -720,9 +720,14 @@ async function handleCommand(sock, msg, text) {
     case 'wm': {
       const wmText = args.trim();
       const ctxInfo   = msg.message?.extendedTextMessage?.contextInfo;
-      const quotedMsg = ctxInfo?.quotedMessage;
+      let quotedMsg = ctxInfo?.quotedMessage;
+      if (quotedMsg?.ephemeralMessage) {
+        quotedMsg = quotedMsg.ephemeralMessage.message;
+      }
       const ownSticker = msg.message?.stickerMessage || null;
       const quotedSticker = quotedMsg?.stickerMessage || null;
+      const quotedImage = quotedMsg?.imageMessage || null;
+      const quotedVideo = quotedMsg?.videoMessage || null;
 
       if (!wmText) {
         await safeSend(sock, jid, {
@@ -735,9 +740,9 @@ async function handleCommand(sock, msg, text) {
         });
         break;
       }
-      if (!ownSticker && !quotedSticker) {
+      if (!ownSticker && !quotedSticker && !quotedImage && !quotedVideo) {
         await safeSend(sock, jid, {
-          text: `⚠️ Reply ke *sticker* dengan command *${p}wm <author>* ya.\n\nContoh: ${p}wm YT: Reza`,
+          text: `⚠️ Reply ke *sticker* (atau foto/video) dengan command *${p}wm <author>* ya.\n\nContoh: ${p}wm YT: Reza`,
           quoted: msg,
         });
         break;
@@ -761,11 +766,16 @@ async function handleCommand(sock, msg, text) {
         const buf = await downloadMediaMessage(targetMsg, 'buffer', {}, {
           logger, reuploadRequest: sock.updateMediaMessage,
         });
-        if (!buf || buf.length === 0) throw new Error('Buffer sticker kosong');
+        if (!buf || buf.length === 0) throw new Error('Buffer media kosong');
 
-        const out = await addWatermark(buf, wmText);
+        let stickerBuf = buf;
+        if (quotedImage || quotedVideo) {
+          stickerBuf = await toWebpBuffer(buf, !!quotedVideo);
+        }
 
-        await sock.sendMessage(jid, { sticker: out, mimetype: 'image/webp' });
+        const out = await addWatermark(stickerBuf, wmText);
+
+        await sock.sendMessage(jid, { sticker: out, mimetype: 'image/webp' }, { quoted: msg });
         stats.inc('sticker');
         await safeSend(sock, jid, { react: { text: '✅', key: msg.key } });
         log.ok(`✅ Watermark sticker: "${wmText.slice(0, 30)}"`);
