@@ -60,13 +60,25 @@ function saveAiConfig() {
 }
 
 // ============================================================
-// LOAD STATE (per-JID on/off)
+// LOAD STATE (global on/off + pengecualian per-chat)
 // ============================================================
-let aiStates = {}; // { [jid]: true/false }
+// Format: { global: bool, off: { [jid]: true } }
+// - global ON  → AI aktif di semua private chat, KECUALI yang ada di `off`
+// - global OFF → AI mati di semua chat (chat baru pun gak dibalas)
+let aiStates = { global: false, off: {} };
 
 try {
   if (fs.existsSync(AI_STATE_FILE)) {
-    aiStates = JSON.parse(fs.readFileSync(AI_STATE_FILE, 'utf8'));
+    const data = JSON.parse(fs.readFileSync(AI_STATE_FILE, 'utf8'));
+    if (data && typeof data.global === 'boolean') {
+      aiStates = { global: data.global, off: data.off || {} };
+    } else if (data && typeof data === 'object') {
+      // Migrasi format lama { [jid]: true/false }:
+      // chat yang dulu di-aioff tetap off, global mulai OFF sampai .aion
+      for (const [jid, val] of Object.entries(data)) {
+        if (val === false) aiStates.off[jid] = true;
+      }
+    }
   }
 } catch (_) {}
 
@@ -78,13 +90,29 @@ function saveAiStates() {
   }
 }
 
-function isAiEnabled(jid) {
-  return aiStates[jid] === true;
+function isAiGlobalEnabled() {
+  return aiStates.global === true;
 }
 
+// Aktif kalau global ON dan chat ini gak di-off-kan khusus
+function isAiEnabled(jid) {
+  return aiStates.global === true && !aiStates.off[jid];
+}
+
+// Per-chat: false = matikan chat ini saja, true = hapus pengecualian (ikut global)
 function setAiEnabled(jid, enabled) {
-  aiStates[jid] = enabled;
+  if (enabled) delete aiStates.off[jid];
+  else aiStates.off[jid] = true;
   saveAiStates();
+}
+
+function setAiGlobal(enabled) {
+  aiStates.global = enabled;
+  saveAiStates();
+}
+
+function countAiChatOff() {
+  return Object.keys(aiStates.off).length;
 }
 
 // ============================================================
@@ -127,6 +155,14 @@ function clearHistory(jid) {
   saveAiMemory();
 }
 
+// Hapus riwayat semua chat, return jumlah chat yang dihapus
+function clearAllHistory() {
+  const count = Object.keys(aiMemory).length;
+  aiMemory = {};
+  saveAiMemory();
+  return count;
+}
+
 // ============================================================
 // BUILD MESSAGES ARRAY FOR API
 // ============================================================
@@ -143,13 +179,8 @@ function buildMessages(jid, userContent) {
     messages.push({ role: entry.role, content: entry.content });
   }
 
-  // Current message
-  if (typeof userContent === 'string') {
-    messages.push({ role: 'user', content: userContent });
-  } else {
-    // Multi-modal (image + text)
-    messages.push({ role: 'user', content: userContent });
-  }
+  // Current message (string atau multi-modal)
+  messages.push({ role: 'user', content: userContent });
 
   return messages;
 }
@@ -377,167 +408,250 @@ async function sendGeneratedFiles(sock, jid, files, zipName, quotedMsg) {
 }
 
 // ============================================================
+// DEBOUNCE / BATCH PESAN (anti spam-reply)
+// ============================================================
+// Pesan beruntun dalam satu chat dikumpulkan dulu, lalu dijawab AI sekali.
+// - Tiap pesan baru me-reset timer AI_DEBOUNCE_MS
+// - Paling lama nunggu AI_MAX_WAIT_MS sejak pesan pertama di batch
+// - Selama AI masih proses, pesan baru masuk antrean batch berikutnya
+//   (maks 1 request AI per chat dalam satu waktu)
+const AI_DEBOUNCE_MS = 4_000;
+const AI_MAX_WAIT_MS = 15_000;
+
+// jid -> { sock, parts: Promise<part|null>[], firstAt, lastAt, lastMsg, timer, processing }
+const aiBuffers = new Map();
+
+function isAiConfigured() {
+  return !!(aiConfig.apiKey && aiConfig.model && aiConfig.baseUrl);
+}
+
+// Ubah satu pesan WA jadi "part": { text, image?: {mime, base64}, summary }
+// Return null kalau gagal / tidak didukung (peringatan sudah dikirim ke user).
+async function extractAiPart(sock, msg) {
+  const jid = msg.key.remoteJid;
+  const textContent =
+    msg.message?.conversation ||
+    msg.message?.extendedTextMessage?.text ||
+    null;
+  const imageMsg = msg.message?.imageMessage || null;
+  const docMsg   = msg.message?.documentMessage || null;
+
+  // === FOTO ===
+  if (imageMsg) {
+    try {
+      const buffer = await downloadMediaMessage(msg, 'buffer', {}, {
+        logger,
+        reuploadRequest: sock.updateMediaMessage,
+      });
+      const caption = imageMsg.caption || '';
+      return {
+        text: caption,
+        image: { mime: imageMsg.mimetype || 'image/jpeg', base64: buffer.toString('base64') },
+        summary: `[Kirim Foto]${caption ? ': ' + caption : ''}`,
+      };
+    } catch (e) {
+      log.err(`AI foto download error: ${e.message}`);
+      await safeSend(sock, jid, { text: '❌ Gagal membaca foto.', quoted: msg });
+      return null;
+    }
+  }
+
+  // === DOKUMEN ===
+  if (docMsg) {
+    try {
+      const buffer = await downloadMediaMessage(msg, 'buffer', {}, {
+        logger,
+        reuploadRequest: sock.updateMediaMessage,
+      });
+      const fileName = docMsg.fileName || 'unknown';
+      const caption = docMsg.caption || '';
+
+      // Dokumen yang sebenarnya gambar (kirim HD)
+      const imgExts = ['.jpg', '.jpeg', '.png', '.webp', '.gif'];
+      if (imgExts.some(ext => fileName.toLowerCase().endsWith(ext))) {
+        return {
+          text: caption,
+          image: { mime: docMsg.mimetype || 'image/jpeg', base64: buffer.toString('base64') },
+          summary: `[Kirim Gambar HD]: ${fileName}`,
+        };
+      }
+
+      const extractedText = await extractDocumentText(buffer, fileName);
+      if (extractedText === null) {
+        await safeSend(sock, jid, {
+          text: `⚠️ Format file *${fileName}* belum didukung.\nYang didukung: TXT, PDF, ZIP (file teks), JS, PY, JSON, HTML, CSS, dan file kode/teks lainnya.`,
+          quoted: msg,
+        });
+        return null;
+      }
+
+      const truncated = extractedText.length > MAX_DOC_READ_CHARS
+        ? extractedText.slice(0, MAX_DOC_READ_CHARS) + '\n\n[...dipotong karena terlalu panjang]'
+        : extractedText;
+
+      return {
+        text: `FILE: ${fileName}${caption ? ' — ' + caption : ''}\n\n${truncated}`,
+        summary: `[Kirim File: ${fileName}]: ${caption || '(tanpa caption)'}`,
+      };
+    } catch (e) {
+      log.err(`AI doc download error: ${e.message}`);
+      await safeSend(sock, jid, { text: '❌ Gagal membaca dokumen.', quoted: msg });
+      return null;
+    }
+  }
+
+  // === TEKS BIASA ===
+  if (textContent) return { text: textContent, summary: textContent };
+  return null;
+}
+
+// Gabungkan beberapa part jadi satu konten user (string atau multi-modal)
+function combineParts(parts) {
+  const texts = parts.map(pt => pt.text).filter(t => t && t.trim());
+  const images = parts.filter(pt => pt.image).map(pt => pt.image);
+
+  let text = texts.join('\n');
+  if (!text && images.length) {
+    text = images.length > 1 ? 'Apa yang ada di gambar-gambar ini?' : 'Apa yang ada di gambar ini?';
+  }
+
+  const content = images.length
+    ? [
+        { type: 'text', text },
+        ...images.map(img => ({
+          type: 'image_url',
+          image_url: { url: `data:${img.mime};base64,${img.base64}` },
+        })),
+      ]
+    : text;
+
+  return {
+    content,
+    summary: parts.map(pt => pt.summary).join('\n'),
+    hasMedia: images.length > 0,
+  };
+}
+
+function getAiErrorMessage(err) {
+  if (err.response?.status === 401) return '❌ API key tidak valid. Cek ulang dengan perintah setai.';
+  if (err.response?.status === 429) return '⚠️ Rate limit tercapai. Coba lagi nanti.';
+  if (err.response?.status === 404) return '❌ Model tidak ditemukan. Cek ulang nama model.';
+  if (err.code === 'ECONNABORTED') return '⏱️ AI timeout (>2 menit). Coba pertanyaan lebih pendek.';
+  return '❌ AI error: ' + (err.message || 'Unknown error');
+}
+
+// Kirim satu batch ke AI dan balas (reply ke pesan terakhir di batch)
+async function processAiBatch(sock, jid, parts, quotedMsg) {
+  try {
+    const { content, summary, hasMedia } = combineParts(parts);
+
+    // Indikator "mengetik..." baru muncul saat AI benar-benar memproses
+    await sock.presenceSubscribe(jid);
+    await sock.sendPresenceUpdate('composing', jid);
+
+    // Satu batch = satu giliran user di memory
+    addToHistory(jid, 'user', summary || '[media]');
+
+    const messages = buildMessages(jid, content);
+    const rawAnswer = await callAI(messages);
+    const answer = cleanAnswer(rawAnswer);
+
+    addToHistory(jid, 'assistant', answer);
+
+    const gen = parseGeneratedFiles(answer);
+    if (gen.files.length) {
+      if (gen.textRemainder) {
+        await sendLongWhatsApp(sock, jid, gen.textRemainder, quotedMsg);
+      }
+      await sendGeneratedFiles(sock, jid, gen.files, gen.zipName, quotedMsg);
+      log.ok(`📦 AI generated ${gen.files.length} file(s) for ${jid}${gen.zipName ? ' as ' + gen.zipName + '.zip' : ''}`);
+    } else {
+      await sendLongWhatsApp(sock, jid, answer, quotedMsg);
+    }
+
+    await sock.sendPresenceUpdate('available', jid);
+    log.ok(`🤖 AI replied to ${jid} (${parts.length} pesan digabung, ${hasMedia ? 'media' : 'text'})`);
+  } catch (err) {
+    log.err(`AI processAiBatch error: ${err.message}`);
+    try { await sock.sendPresenceUpdate('available', jid); } catch (_) {}
+    await safeSend(sock, jid, { text: getAiErrorMessage(err), quoted: quotedMsg });
+  }
+}
+
+function scheduleAiFlush(jid) {
+  const buf = aiBuffers.get(jid);
+  if (!buf || buf.processing) return; // nanti dijadwalkan ulang setelah proses selesai
+
+  if (buf.timer) clearTimeout(buf.timer);
+  const due = Math.min(buf.lastAt + AI_DEBOUNCE_MS, buf.firstAt + AI_MAX_WAIT_MS);
+  buf.timer = setTimeout(() => {
+    flushAiBuffer(jid).catch(e => log.err(`AI flush error: ${e.message}`));
+  }, Math.max(0, due - Date.now()));
+}
+
+async function flushAiBuffer(jid) {
+  const buf = aiBuffers.get(jid);
+  if (!buf || buf.processing || !buf.parts.length) return;
+
+  if (buf.timer) { clearTimeout(buf.timer); buf.timer = null; }
+
+  // Ambil batch sekarang; pesan yang masuk selama proses → batch berikutnya
+  const pending  = buf.parts;
+  const quoted   = buf.lastMsg;
+  const sock     = buf.sock;
+  buf.parts = [];
+  buf.processing = true;
+
+  try {
+    const parts = (await Promise.all(pending)).filter(Boolean);
+    // Cek ulang: bisa aja owner aioff / config dihapus selama nunggu
+    if (!parts.length || !isAiEnabled(jid) || !isAiConfigured()) return;
+    await processAiBatch(sock, jid, parts, quoted);
+  } finally {
+    buf.processing = false;
+    if (buf.parts.length) scheduleAiFlush(jid);
+    else aiBuffers.delete(jid);
+  }
+}
+
+// ============================================================
 // HANDLE AI MESSAGE (dipanggil dari handler.js)
 // ============================================================
+// Return true kalau pesan diambil alih AI (masuk buffer), false kalau bukan urusan AI.
 async function handleAiMessage(sock, msg) {
   const jid = msg.key?.remoteJid;
   if (!jid || !isPrivateJid(jid)) return false;
   if (!isAiEnabled(jid)) return false;
-  if (!aiConfig.apiKey || !aiConfig.model || !aiConfig.baseUrl) return false;
+  if (!isAiConfigured()) return false;
 
-  try {
-    // Tentukan tipe pesan
-    const textContent =
-      msg.message?.conversation ||
-      msg.message?.extendedTextMessage?.text ||
-      null;
+  const hasContent = !!(
+    msg.message?.conversation ||
+    msg.message?.extendedTextMessage?.text ||
+    msg.message?.imageMessage ||
+    msg.message?.documentMessage
+  );
+  if (!hasContent) return false;
 
-    const imageMsg  = msg.message?.imageMessage || null;
-    const docMsg    = msg.message?.documentMessage || null;
-    const stickerMsg = msg.message?.stickerMessage || null;
-
-    // Abaikan pesan tanpa konten yang bisa diproses
-    if (!textContent && !imageMsg && !docMsg) return false;
-
-    // Tampilkan typing indicator
-    await sock.presenceSubscribe(jid);
-    await sock.sendPresenceUpdate('composing', jid);
-
-    let userContent = null;
-    let memorySummary = null;
-
-    // === FOTO ===
-    if (imageMsg) {
-      try {
-        const buffer = await downloadMediaMessage(msg, 'buffer', {}, {
-          logger,
-          reuploadRequest: sock.updateMediaMessage,
-        });
-        const base64 = buffer.toString('base64');
-        const mime = imageMsg.mimetype || 'image/jpeg';
-        const caption = imageMsg.caption || 'Apa yang ada di gambar ini?';
-
-        // Multi-modal content
-        userContent = [
-          { type: 'text', text: caption },
-          { type: 'image_url', image_url: { url: `data:${mime};base64,${base64}` } },
-        ];
-
-        memorySummary = `[Kirim Foto]: ${caption}`;
-      } catch (e) {
-        log.err(`AI foto download error: ${e.message}`);
-        await safeSend(sock, jid, { text: '❌ Gagal membaca foto.' });
-        return true;
-      }
-    }
-
-    // === DOKUMEN ===
-    else if (docMsg) {
-      try {
-        const buffer = await downloadMediaMessage(msg, 'buffer', {}, {
-          logger,
-          reuploadRequest: sock.updateMediaMessage,
-        });
-        const fileName = docMsg.fileName || 'unknown';
-        const caption = docMsg.caption || '';
-
-        // Cek apakah dokumen itu sebenarnya foto/gambar
-        const imgExts = ['.jpg', '.jpeg', '.png', '.webp', '.gif'];
-        if (imgExts.some(ext => fileName.toLowerCase().endsWith(ext))) {
-          const base64 = buffer.toString('base64');
-          const mime = docMsg.mimetype || 'image/jpeg';
-
-          userContent = [
-            { type: 'text', text: caption || 'Apa yang ada di gambar ini?' },
-            { type: 'image_url', image_url: { url: `data:${mime};base64,${base64}` } },
-          ];
-          memorySummary = `[Kirim Gambar HD]: ${fileName}`;
-        } else {
-          // Coba ekstrak teks
-          const extractedText = await extractDocumentText(buffer, fileName);
-
-          if (extractedText === null) {
-            await safeSend(sock, jid, {
-              text: `⚠️ Format file *${fileName}* belum didukung.\nYang didukung: TXT, PDF, ZIP (file teks), JS, PY, JSON, HTML, CSS, dan file kode/teks lainnya.`,
-            });
-            return true;
-          }
-
-          // Truncate kalau terlalu panjang
-          const truncated = extractedText.length > MAX_DOC_READ_CHARS
-            ? extractedText.slice(0, MAX_DOC_READ_CHARS) + '\n\n[...dipotong karena terlalu panjang]'
-            : extractedText;
-
-          userContent = `FILE: ${fileName}${caption ? ' — ' + caption : ''}\n\n${truncated}`;
-          memorySummary = `[Kirim File: ${fileName}]: ${caption || '(tanpa caption)'}`;
-        }
-      } catch (e) {
-        log.err(`AI doc download error: ${e.message}`);
-        await safeSend(sock, jid, { text: '❌ Gagal membaca dokumen.' });
-        return true;
-      }
-    }
-
-    // === TEKS BIASA ===
-    else if (textContent) {
-      userContent = textContent;
-      memorySummary = textContent;
-    }
-
-    if (!userContent) return false;
-
-    // Simpan pesan user ke memory (versi ringkasan)
-    addToHistory(jid, 'user', memorySummary || (typeof userContent === 'string' ? userContent : '[media]'));
-
-    // Build messages & call API
-    const messages = buildMessages(jid, userContent);
-    const rawAnswer = await callAI(messages);
-    const answer = cleanAnswer(rawAnswer);
-
-    // Simpan jawaban AI ke memory
-    addToHistory(jid, 'assistant', answer);
-
-    // Deteksi file yang diminta dibuat → kirim sebagai dokumen
-    const gen = parseGeneratedFiles(answer);
-    if (gen.files.length) {
-      if (gen.textRemainder) {
-        await sendLongWhatsApp(sock, jid, gen.textRemainder, msg);
-      }
-      await sendGeneratedFiles(sock, jid, gen.files, gen.zipName, msg);
-      log.ok(`📦 AI generated ${gen.files.length} file(s) for ${jid}${gen.zipName ? ' as ' + gen.zipName + '.zip' : ''}`);
-    } else {
-      // Kirim jawaban — split kalau panjang
-      await sendLongWhatsApp(sock, jid, answer, msg);
-    }
-
-    // Stop typing
-    await sock.sendPresenceUpdate('available', jid);
-
-    log.ok(`🤖 AI replied to ${jid} (${(typeof userContent === 'string' ? 'text' : 'media')})`);
-    return true;
-
-  } catch (err) {
-    log.err(`AI handleAiMessage error: ${err.message}`);
-
-    // Stop typing
-    try { await sock.sendPresenceUpdate('available', jid); } catch (_) {}
-
-    let errorMsg = '❌ AI error: ' + (err.message || 'Unknown error');
-
-    // Handle spesifik error dari API
-    if (err.response?.status === 401) {
-      errorMsg = '❌ API key tidak valid. Cek ulang dengan perintah setai.';
-    } else if (err.response?.status === 429) {
-      errorMsg = '⚠️ Rate limit tercapai. Coba lagi nanti.';
-    } else if (err.response?.status === 404) {
-      errorMsg = '❌ Model tidak ditemukan. Cek ulang nama model.';
-    } else if (err.code === 'ECONNABORTED') {
-      errorMsg = '⏱️ AI timeout (>2 menit). Coba pertanyaan lebih pendek.';
-    }
-
-    await safeSend(sock, jid, { text: errorMsg, quoted: msg });
-    return true;
+  let buf = aiBuffers.get(jid);
+  if (!buf) {
+    buf = { sock, parts: [], firstAt: 0, lastAt: 0, lastMsg: null, timer: null, processing: false };
+    aiBuffers.set(jid, buf);
   }
+
+  const now = Date.now();
+  if (!buf.parts.length) buf.firstAt = now;
+  buf.lastAt = now;
+  buf.lastMsg = msg;
+  buf.sock = sock; // pakai socket terbaru (kalau habis reconnect)
+
+  // Download media langsung jalan di background; urutan tetap terjaga lewat array promise
+  buf.parts.push(extractAiPart(sock, msg).catch(e => {
+    log.err(`AI extract error: ${e.message}`);
+    return null;
+  }));
+
+  scheduleAiFlush(jid);
+  return true;
 }
 
 // ============================================================
@@ -667,9 +781,13 @@ module.exports = {
   saveAiConfig,
   isAiEnabled,
   setAiEnabled,
+  isAiGlobalEnabled,
+  setAiGlobal,
+  countAiChatOff,
   getHistory,
   addToHistory,
   clearHistory,
+  clearAllHistory,
   handleAiMessage,
   askStatelessAI,
   extractDocumentText,

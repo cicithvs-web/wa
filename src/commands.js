@@ -20,7 +20,8 @@ const {
 } = require('./welcome');
 const {
   aiConfig, saveAiConfig, isAiEnabled, setAiEnabled,
-  clearHistory, DEFAULT_SYSTEM_PROMPT, askStatelessAI, extractDocumentText,
+  isAiGlobalEnabled, setAiGlobal, countAiChatOff,
+  clearHistory, clearAllHistory, DEFAULT_SYSTEM_PROMPT, askStatelessAI, extractDocumentText,
 } = require('./ai');
 
 //----------COMMAND HANDLER----------
@@ -76,8 +77,9 @@ async function handleCommand(sock, msg, text) {
           `› Placeholder: {name} {group} {count}\n\n` +
           `*AI CHAT*\n` +
           `› *${p}ask <pertanyaan>* · *${p}ai*\n` +
-          `› *${p}aion* / *${p}aioff* · *${p}setai key|model|url*\n` +
-          `› *${p}aisystem <prompt>* · *${p}newchat*\n\n` +
+          `› *${p}aion* (semua chat) · *${p}aioff* / *${p}aioff all*\n` +
+          `› *${p}setai key|model|url*\n` +
+          `› *${p}aisystem <prompt>* · *${p}newchat* / *${p}newchat all*\n\n` +
           `*AUTO-REPLY* _(owner)_\n` +
           `› *${p}set <trigger> | <balasan>*\n` +
           `› *${p}listauto* · *${p}del <trigger>*\n\n` +
@@ -1154,23 +1156,32 @@ async function handleCommand(sock, msg, text) {
     }
 
     case 'ai': {
-      const enabled = isAiEnabled(jid);
+      const globalOn = isAiGlobalEnabled();
+      const chatOn = isAiEnabled(jid);
       const hasConfig = !!(aiConfig.apiKey && aiConfig.model && aiConfig.baseUrl);
       const masked = aiConfig.apiKey
         ? aiConfig.apiKey.slice(0, 6) + '...' + aiConfig.apiKey.slice(-4)
         : '(belum diset)';
+      const chatLine = isPrivateJid(jid)
+        ? `Chat ini: ${chatOn ? 'ON' : 'OFF'}\n`
+        : '';
 
       await safeSend(sock, jid, {
         text:
-          `*AI Chat:* ${enabled ? 'ON' : 'OFF'} | Config: ${hasConfig ? 'OK' : 'belum lengkap'}\n` +
+          `*AI Chat (semua chat):* ${globalOn ? 'ON' : 'OFF'} | Config: ${hasConfig ? 'OK' : 'belum lengkap'}\n` +
+          chatLine +
+          `Chat yang di-off khusus: ${countAiChatOff()}\n` +
           `Key: ${masked}\n` +
           `Model: ${aiConfig.model || '-'}\n` +
           `URL: ${aiConfig.baseUrl || '-'}\n\n` +
           `*System Prompt:*\n${(aiConfig.systemPrompt || DEFAULT_SYSTEM_PROMPT).slice(0, 300)}${(aiConfig.systemPrompt || '').length > 300 ? '...' : ''}\n\n` +
-          `${p}aion / ${p}aioff — toggle\n` +
+          `${p}aion — nyalakan di semua chat (+ chat ini)\n` +
+          `${p}aioff — matikan chat ini saja\n` +
+          `${p}aioff all — matikan di semua chat\n` +
           `${p}setai — konfigurasi\n` +
           `${p}aisystem — ubah prompt\n` +
-          `${p}newchat — reset memory`,
+          `${p}newchat — reset memory chat ini\n` +
+          `${p}newchat all — reset memory semua chat`,
       });
       break;
     }
@@ -1183,22 +1194,41 @@ async function handleCommand(sock, msg, text) {
         });
         break;
       }
-      if (!isPrivateJid(jid)) {
-        await safeSend(sock, jid, { text: `⚠️ AI auto-reply hanya tersedia di *private chat* (biar token gak habis 😅)` });
-        break;
-      }
-      setAiEnabled(jid, true);
+      // Bisa diketik di mana saja (private/grup) → AI nyala di semua private chat.
+      // Kalau diketik di private chat yang sebelumnya di-aioff, chat itu ikut dinyalakan lagi.
+      setAiGlobal(true);
+      if (isPrivateJid(jid)) setAiEnabled(jid, true);
+      const offCount = countAiChatOff();
       await safeSend(sock, jid, {
-        text: `AI Chat *ON* — Model: *${aiConfig.model}*\nBisa baca: teks, foto, dokumen.\nMatikan: *${p}aioff* | Reset: *${p}newchat*`,
+        text:
+          `AI Chat *ON* di semua private chat — Model: *${aiConfig.model}*\n` +
+          `Bisa baca: teks, foto, dokumen.\n` +
+          (offCount ? `Pengecualian (masih off): ${offCount} chat — ketik *${p}aion* di chat tsb buat nyalain.\n` : '') +
+          `Matikan chat ini: *${p}aioff* | Semua: *${p}aioff all* | Reset: *${p}newchat*`,
         quoted: msg,
       });
       break;
     }
 
     case 'aioff': {
+      if (args.toLowerCase() === 'all') {
+        setAiGlobal(false);
+        await safeSend(sock, jid, {
+          text: `AI Chat *OFF* di semua chat.\nAktifkan lagi: *${p}aion*`,
+          quoted: msg,
+        });
+        break;
+      }
+      if (!isPrivateJid(jid)) {
+        await safeSend(sock, jid, {
+          text: `⚠️ AI auto-reply cuma jalan di private chat. Pakai *${p}aioff all* buat matikan semua.`,
+          quoted: msg,
+        });
+        break;
+      }
       setAiEnabled(jid, false);
       await safeSend(sock, jid, {
-        text: `AI Chat *OFF*.\nAktifkan: *${p}aion*`,
+        text: `AI Chat *OFF* untuk chat ini saja.\nChat lain tetap ${isAiGlobalEnabled() ? 'ON' : 'OFF'}.\nNyalakan lagi: *${p}aion* | Matikan semua: *${p}aioff all*`,
         quoted: msg,
       });
       break;
@@ -1290,9 +1320,17 @@ async function handleCommand(sock, msg, text) {
     }
 
     case 'newchat': {
+      if (args.toLowerCase() === 'all') {
+        const count = clearAllHistory();
+        await safeSend(sock, jid, {
+          text: `Memory AI di *semua chat* direset (${count} chat).`,
+          quoted: msg,
+        });
+        break;
+      }
       clearHistory(jid);
       await safeSend(sock, jid, {
-        text: `Memory AI direset. Percakapan baru.`,
+        text: `Memory AI chat ini direset. Percakapan baru.\nReset semua chat: *${p}newchat all*`,
         quoted: msg,
       });
       break;
